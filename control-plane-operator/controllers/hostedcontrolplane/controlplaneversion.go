@@ -1,6 +1,8 @@
 package hostedcontrolplane
 
 import (
+	"strings"
+
 	configv1 "github.com/openshift/api/config/v1"
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -56,6 +58,7 @@ func reconcileControlPlaneVersion(
 			Image:       desiredImage,
 		}
 		result.History = append([]hyperv1.ControlPlaneUpdateHistory{entry}, result.History...)
+		result.History = pruneHistory(result.History)
 		return result
 	}
 
@@ -67,6 +70,7 @@ func reconcileControlPlaneVersion(
 		result.History[0].CompletionTime = &now
 	}
 
+	result.History = pruneHistory(result.History)
 	return result
 }
 
@@ -114,4 +118,112 @@ func mergeEqualVersions(components []hyperv1.ControlPlaneComponent) string {
 		}
 	}
 	return best
+}
+
+// Pruning constants ported from CVO (pkg/cvo/status_history.go).
+const (
+	maxHistory           = 100
+	maxFinalEntryIndex   = 4
+	mostImportantWeight  = 1000.0
+	interestingWeight    = 30.0
+	partialMinorWeight   = 20.0
+	partialZStreamWeight = -20.0
+	sliceIndexWeight     = -1.01
+)
+
+// pruneHistory caps the history at maxHistory entries by repeatedly removing
+// the lowest-ranked entry using CVO's weighted ranking algorithm.
+func pruneHistory(history []hyperv1.ControlPlaneUpdateHistory) []hyperv1.ControlPlaneUpdateHistory {
+	for len(history) > maxHistory {
+		history = pruneLowestRanked(history)
+	}
+	return history
+}
+
+// pruneLowestRanked removes the single entry with the lowest computed rank.
+func pruneLowestRanked(history []hyperv1.ControlPlaneUpdateHistory) []hyperv1.ControlPlaneUpdateHistory {
+	n := len(history)
+
+	// Find the most recently completed entry (first Completed scanning from index 0).
+	mostRecentCompletedIdx := -1
+	for i := range history {
+		if history[i].State == configv1.CompletedUpdate {
+			mostRecentCompletedIdx = i
+			break
+		}
+	}
+
+	// Find first and last Completed entry per minor version.
+	type minorBounds struct{ first, last int }
+	minors := make(map[string]*minorBounds)
+	for i := range history {
+		if history[i].State != configv1.CompletedUpdate {
+			continue
+		}
+		minor := extractMinor(history[i].Version)
+		if minor == "" {
+			continue
+		}
+		if b, ok := minors[minor]; ok {
+			if i > b.last {
+				b.last = i
+			}
+		} else {
+			minors[minor] = &minorBounds{first: i, last: i}
+		}
+	}
+
+	// Compute ranks and find the entry with the lowest rank.
+	lowestIdx := 0
+	var lowestWeight float64
+	for i := range history {
+		var w float64
+
+		protected := i <= maxFinalEntryIndex || i == n-1 || i == mostRecentCompletedIdx
+		if protected {
+			w = mostImportantWeight
+		} else if history[i].State == configv1.CompletedUpdate {
+			minor := extractMinor(history[i].Version)
+			if b, ok := minors[minor]; ok && (i == b.first || i == b.last) {
+				w = interestingWeight
+			}
+		} else if history[i].State == configv1.PartialUpdate {
+			var prevMinor, nextMinor string
+			if i > 0 {
+				prevMinor = extractMinor(history[i-1].Version)
+			}
+			if i < n-1 {
+				nextMinor = extractMinor(history[i+1].Version)
+			}
+			if prevMinor != "" && nextMinor != "" && prevMinor != nextMinor {
+				w = partialMinorWeight
+			} else {
+				w = partialZStreamWeight
+			}
+		}
+
+		// Index penalty: entries closer to the start (newest) receive more penalty,
+		// matching CVO's behavior of thinning out middle history while preserving
+		// the endpoints. The fractional component breaks ties deterministically.
+		w += sliceIndexWeight * float64(n-1-i)
+
+		if i == 0 || w < lowestWeight {
+			lowestWeight = w
+			lowestIdx = i
+		}
+	}
+
+	result := make([]hyperv1.ControlPlaneUpdateHistory, 0, n-1)
+	result = append(result, history[:lowestIdx]...)
+	result = append(result, history[lowestIdx+1:]...)
+	return result
+}
+
+// extractMinor returns the major.minor portion of a semver string (e.g., "4.17" from "4.17.2").
+func extractMinor(version string) string {
+	parts := strings.SplitN(version, ".", 3)
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[0] + "." + parts[1]
 }
