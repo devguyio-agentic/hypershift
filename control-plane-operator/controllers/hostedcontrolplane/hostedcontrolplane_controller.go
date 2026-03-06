@@ -116,6 +116,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/utils/clock"
 	"k8s.io/utils/ptr"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -182,9 +183,13 @@ type HostedControlPlaneReconciler struct {
 	ImageMetadataProvider                   util.ImageMetadataProvider
 	cpoAzureCredentialsLoaded               sync.Map
 	kmsAzureCredentialsLoaded               sync.Map
+	clock                                   clock.Clock
 }
 
 func (r *HostedControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager, createOrUpdate upsert.CreateOrUpdateFN, hcp *hyperv1.HostedControlPlane) error {
+	if r.clock == nil {
+		r.clock = clock.RealClock{}
+	}
 	r.setup(createOrUpdate)
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&hyperv1.HostedControlPlane{}).
@@ -720,6 +725,19 @@ func (r *HostedControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 		)
 		hostedControlPlane.Status.Ready = ready
 		meta.SetStatusCondition(&hostedControlPlane.Status.Conditions, condition)
+	}
+
+	// Reconcile controlPlaneVersion status
+	{
+		componentsList := &hyperv1.ControlPlaneComponentList{}
+		if err := r.Client.List(ctx, componentsList, client.InNamespace(hostedControlPlane.Namespace)); err != nil {
+			return reconcile.Result{}, fmt.Errorf("failed to list control plane components for version reconciliation: %w", err)
+		}
+		clk := r.clock
+		if clk == nil {
+			clk = clock.RealClock{}
+		}
+		hostedControlPlane.Status.ControlPlaneVersion = reconcileControlPlaneVersion(hostedControlPlane, componentsList.Items, clk)
 	}
 
 	// Admin Kubeconfig

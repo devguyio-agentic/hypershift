@@ -1831,6 +1831,11 @@ type HostedClusterStatus struct {
 	// +kubebuilder:validation:MaxItems=100
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
+	// controlPlaneVersion is the status of the control plane version,
+	// tracking management-side component versions independently from CVO.
+	// +optional
+	ControlPlaneVersion *ControlPlaneVersionStatus `json:"controlPlaneVersion,omitempty"`
+
 	// version is the status of the release version applied to the
 	// HostedCluster.
 	// +optional
