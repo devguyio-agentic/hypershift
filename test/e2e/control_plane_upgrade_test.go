@@ -37,9 +37,8 @@ func TestUpgradeControlPlane(t *testing.T) {
 		// Sanity check the cluster by waiting for the nodes to report ready
 		guestClient := e2eutil.WaitForGuestClient(t, ctx, mgtClient, hostedCluster)
 
-		var startingVersion string
 		if len(hostedCluster.Status.Version.History) > 0 {
-			startingVersion = hostedCluster.Status.Version.History[0].Version
+			t.Logf("Starting version: %s", hostedCluster.Status.Version.History[0].Version)
 		}
 
 		// Set the semantic version to the latest release image for version gating tests
