@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"sync"
+
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 var _ ProviderWithRegistryOverrides = (*RegistryMirrorProviderDecorator)(nil)
@@ -27,12 +29,22 @@ func (p *RegistryMirrorProviderDecorator) Lookup(ctx context.Context, image stri
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
-	releaseImage, err := p.Delegate.Lookup(ctx, image, pullSecret)
+	logger := ctrl.LoggerFrom(ctx)
+
+	lookupImage := image
+	for registrySource, registryDest := range p.RegistryOverrides {
+		lookupImage = strings.Replace(lookupImage, registrySource, registryDest, 1)
+	}
+	if lookupImage != image {
+		logger.Info("Applied registry override to release image", "original", image, "overridden", lookupImage)
+	}
+
+	releaseImage, err := p.Delegate.Lookup(ctx, lookupImage, pullSecret)
 	if err != nil {
 		return nil, err
 	}
 
-	imageStream := releaseImage.ImageStream.DeepCopy() // deepCopy so the cache is not overridden.
+	imageStream := releaseImage.ImageStream.DeepCopy()
 	for i := range imageStream.Spec.Tags {
 		for registrySource, registryDest := range p.RegistryOverrides {
 			imageStream.Spec.Tags[i].From.Name = strings.Replace(imageStream.Spec.Tags[i].From.Name, registrySource, registryDest, 1)
