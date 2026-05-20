@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	. "github.com/onsi/gomega"
+
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/cmd/cluster/core"
 	azureinfra "github.com/openshift/hypershift/cmd/infra/azure"
@@ -292,6 +294,17 @@ func TestCreateCluster(t *testing.T) {
 				"--endpoint-access-private-additional-allowed-subscriptions=sub-1,sub-2",
 			},
 		},
+		{
+			name: "When oauth-publishing-strategy is LoadBalancer with workload identities it should render HostedCluster with OAuth LoadBalancer",
+			args: []string{
+				"--azure-creds=" + credentialsFile,
+				"--infra-json=" + infraFile,
+				"--render-sensitive",
+				"--name=example",
+				"--pull-secret=" + pullSecretFile,
+				"--oauth-publishing-strategy=LoadBalancer",
+			},
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			flags := pflag.NewFlagSet(testCase.name, pflag.ContinueOnError)
@@ -318,6 +331,57 @@ func TestCreateCluster(t *testing.T) {
 				t.Fatalf("failed to read manifests file: %v", err)
 			}
 			testutil.CompareWithFixture(t, manifests)
+		})
+	}
+}
+
+func TestValidateOAuthPublishingStrategy(t *testing.T) {
+	tests := map[string]struct {
+		oauthPublishingStrategy string
+		managedIdentitiesFile   string
+		dataPlaneIdentitiesFile string
+		expectError             bool
+		expectedErrorMsg        string
+	}{
+		"When oauth-publishing-strategy is LoadBalancer with managed identities file, it should return an error": {
+			oauthPublishingStrategy: "LoadBalancer",
+			managedIdentitiesFile:   "fake-managed-identities.json",
+			dataPlaneIdentitiesFile: "fake-data-plane-identities.json",
+			expectError:             true,
+			expectedErrorMsg:        "--oauth-publishing-strategy LoadBalancer is not supported for ARO HCP (managed identities) clusters",
+		},
+		"When oauth-publishing-strategy is an invalid value, it should return an error": {
+			oauthPublishingStrategy: "InvalidValue",
+			expectError:             true,
+			expectedErrorMsg:        "--oauth-publishing-strategy must be either Route or LoadBalancer",
+		},
+		"When oauth-publishing-strategy is Route, it should pass validation": {
+			oauthPublishingStrategy: "Route",
+			expectError:             false,
+		},
+		"When oauth-publishing-strategy is LoadBalancer without managed identities, it should pass validation": {
+			oauthPublishingStrategy: "LoadBalancer",
+			expectError:             false,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+
+			opts := DefaultOptions()
+			opts.CredentialsFile = "fake"
+			opts.OAuthPublishingStrategy = test.oauthPublishingStrategy
+			opts.ManagedIdentitiesFile = test.managedIdentitiesFile
+			opts.DataPlaneIdentitiesFile = test.dataPlaneIdentitiesFile
+
+			_, err := opts.Validate(context.Background(), &core.CreateOptions{})
+			if test.expectError {
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(err).To(MatchError(test.expectedErrorMsg))
+			} else {
+				g.Expect(err).NotTo(HaveOccurred())
+			}
 		})
 	}
 }

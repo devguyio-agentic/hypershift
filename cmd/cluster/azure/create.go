@@ -85,6 +85,7 @@ func bindCoreOptions(opts *RawCreateOptions, flags *pflag.FlagSet) {
 
 	// self-managed Azure only flags; these flags should not be used for ARO HCP (managed Azure)
 	flags.StringVar(&opts.WorkloadIdentitiesFile, "workload-identities-file", opts.WorkloadIdentitiesFile, util.WorkloadIdentitiesFileDescription)
+	flags.StringVar(&opts.OAuthPublishingStrategy, "oauth-publishing-strategy", "Route", "Publishing strategy for the OAuth server (Route or LoadBalancer). LoadBalancer is only supported on self-managed Azure.")
 
 	// flags used for both ARO HCP and self-managed Azure
 	// In ARO HCP, it assigns roles to managed identities; in self-managed Azure, it assigns roles to workload identities.
@@ -143,6 +144,9 @@ func BindProductFlags(opts *RawCreateOptions, flags *pflag.FlagSet) {
 	// Encryption
 	flags.StringVar(&opts.EncryptionKeyID, "encryption-key-id", opts.EncryptionKeyID, util.EncryptionKeyIDDescription)
 
+	// OAuth publishing strategy
+	flags.StringVar(&opts.OAuthPublishingStrategy, "oauth-publishing-strategy", "Route", "Publishing strategy for the OAuth server (Route or LoadBalancer)")
+
 	// Private connectivity flags
 	bindEndpointAccessFlags(opts, flags)
 
@@ -193,6 +197,18 @@ func (o *RawCreateOptions) Validate(ctx context.Context, _ *core.CreateOptions) 
 		if !slices.Contains(validEndpointAccessValues, o.EndpointAccess) {
 			return nil, fmt.Errorf("--endpoint-access must be one of: Public, PublicAndPrivate, Private")
 		}
+	}
+
+	// Validate the OAuth publishing strategy value if provided
+	switch o.OAuthPublishingStrategy {
+	case "", "Route":
+		// valid defaults
+	case "LoadBalancer":
+		if o.ManagedIdentitiesFile != "" {
+			return nil, fmt.Errorf("--oauth-publishing-strategy LoadBalancer is not supported for ARO HCP (managed identities) clusters")
+		}
+	default:
+		return nil, fmt.Errorf("--oauth-publishing-strategy must be either Route or LoadBalancer")
 	}
 
 	// Validate NAT subnet resource ID format if provided
@@ -367,26 +383,47 @@ func (o *CreateOptions) ApplyPlatformSpecifics(cluster *hyperv1.HostedCluster) e
 	}
 
 	if o.encryptionKey != nil {
+		azureKMSSpec := &hyperv1.AzureKMSSpec{
+			ActiveKey: hyperv1.AzureKMSKey{
+				KeyVaultName: o.encryptionKey.KeyVaultName,
+				KeyName:      o.encryptionKey.KeyName,
+				KeyVersion:   o.encryptionKey.KeyVersion,
+			},
+		}
+
+		if o.infra.WorkloadIdentities != nil {
+			if o.infra.KMSClientID == "" {
+				return fmt.Errorf("self-managed Azure KMS requires a KMS workload identity; re-run 'hypershift create iam azure' with --enable-kms")
+			}
+			azureKMSSpec.WorkloadIdentity = hyperv1.WorkloadIdentity{
+				ClientID: hyperv1.AzureClientID(o.infra.KMSClientID),
+			}
+		} else {
+			// Managed Azure (ARO HCP) with managed identities
+			azureKMSSpec.KMS = hyperv1.ManagedIdentity{
+				CredentialsSecretName: o.KMSUserAssignedCredsSecretName,
+				ObjectEncoding:        ObjectEncoding,
+			}
+		}
+
 		cluster.Spec.SecretEncryption = &hyperv1.SecretEncryptionSpec{
 			Type: hyperv1.KMS,
 			KMS: &hyperv1.KMSSpec{
 				Provider: hyperv1.AZURE,
-				Azure: &hyperv1.AzureKMSSpec{
-					ActiveKey: hyperv1.AzureKMSKey{
-						KeyVaultName: o.encryptionKey.KeyVaultName,
-						KeyName:      o.encryptionKey.KeyName,
-						KeyVersion:   o.encryptionKey.KeyVersion,
-					},
-					KMS: hyperv1.ManagedIdentity{
-						CredentialsSecretName: o.KMSUserAssignedCredsSecretName,
-						ObjectEncoding:        ObjectEncoding,
-					},
-				},
+				Azure:    azureKMSSpec,
 			},
 		}
 	}
 
 	cluster.Spec.Services = core.GetIngressServicePublishingStrategyMapping(cluster.Spec.Networking.NetworkType, o.externalDNSDomain != "")
+
+	for i, svc := range cluster.Spec.Services {
+		if svc.Service == hyperv1.OAuthServer && o.OAuthPublishingStrategy == "LoadBalancer" {
+			cluster.Spec.Services[i].ServicePublishingStrategy.Type = hyperv1.LoadBalancer
+			break
+		}
+	}
+
 	if o.externalDNSDomain != "" {
 		for i, svc := range cluster.Spec.Services {
 			switch svc.Service {
@@ -396,8 +433,14 @@ func (o *CreateOptions) ApplyPlatformSpecifics(cluster *hyperv1.HostedCluster) e
 				}
 
 			case hyperv1.OAuthServer:
-				cluster.Spec.Services[i].Route = &hyperv1.RoutePublishingStrategy{
-					Hostname: fmt.Sprintf("oauth-%s.%s", cluster.Name, o.externalDNSDomain),
+				if cluster.Spec.Services[i].ServicePublishingStrategy.Type == hyperv1.LoadBalancer {
+					cluster.Spec.Services[i].LoadBalancer = &hyperv1.LoadBalancerPublishingStrategy{
+						Hostname: fmt.Sprintf("oauth-%s.%s", cluster.Name, o.externalDNSDomain),
+					}
+				} else {
+					cluster.Spec.Services[i].Route = &hyperv1.RoutePublishingStrategy{
+						Hostname: fmt.Sprintf("oauth-%s.%s", cluster.Name, o.externalDNSDomain),
+					}
 				}
 
 			case hyperv1.Konnectivity:

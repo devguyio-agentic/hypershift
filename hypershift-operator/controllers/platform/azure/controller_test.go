@@ -4,14 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"testing"
 	"time"
 
+	. "github.com/onsi/gomega"
+
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	hyperapi "github.com/openshift/hypershift/support/api"
 	"github.com/openshift/hypershift/support/azureutil"
-	supportutil "github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/k8sutil"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	azruntime "github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
@@ -42,11 +45,13 @@ type mockPrivateLinkServicesAPI struct {
 	updatePECalled   bool
 	updatePECallArgs []string // tracks the PE connection names that were rejected
 	lastName         string
+	lastCreateParams armnetwork.PrivateLinkService
 }
 
 func (m *mockPrivateLinkServicesAPI) BeginCreateOrUpdate(_ context.Context, resourceGroupName string, serviceName string, parameters armnetwork.PrivateLinkService, _ *armnetwork.PrivateLinkServicesClientBeginCreateOrUpdateOptions) (*azruntime.Poller[armnetwork.PrivateLinkServicesClientCreateOrUpdateResponse], error) {
 	m.createCalled = true
 	m.lastName = serviceName
+	m.lastCreateParams = parameters
 	if m.createErr != nil {
 		return nil, m.createErr
 	}
@@ -111,7 +116,7 @@ func newAzureNotFoundError() error {
 	}
 }
 
-func TestReconcile_NotFound(t *testing.T) {
+func TestReconcile_WhenCRDoesNotExist_ItShouldReturnEmptyResult(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(hyperapi.Scheme).Build()
 
 	r := &AzurePrivateLinkServiceController{
@@ -136,7 +141,7 @@ func TestReconcile_NotFound(t *testing.T) {
 	}
 }
 
-func TestReconcile_PausedUntil(t *testing.T) {
+func TestReconcile_WhenHostedClusterIsPaused_ItShouldRequeueAfterPauseExpiry(t *testing.T) {
 	pausedUntil := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
 
 	hc := &hyperv1.HostedCluster{
@@ -155,7 +160,7 @@ func TestReconcile_PausedUntil(t *testing.T) {
 			Namespace:  "test-ns",
 			Finalizers: []string{azurePLSFinalizer},
 			Annotations: map[string]string{
-				supportutil.HostedClusterAnnotation: "test-ns/test-cluster",
+				k8sutil.HostedClusterAnnotation: "test-ns/test-cluster",
 			},
 		},
 		Spec: hyperv1.AzurePrivateLinkServiceSpec{
@@ -210,11 +215,11 @@ func TestReconcile_WhenLoadBalancerIPIsSet_ItShouldCreateAPLS(t *testing.T) {
 
 	azPLS := &hyperv1.AzurePrivateLinkService{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       "test-pls",
+			Name:       "private-router",
 			Namespace:  "test-ns",
 			Finalizers: []string{azurePLSFinalizer},
 			Annotations: map[string]string{
-				supportutil.HostedClusterAnnotation: "test-ns/test-cluster",
+				k8sutil.HostedClusterAnnotation: "test-ns/test-cluster",
 			},
 		},
 		Spec: hyperv1.AzurePrivateLinkServiceSpec{
@@ -267,7 +272,7 @@ func TestReconcile_WhenLoadBalancerIPIsSet_ItShouldCreateAPLS(t *testing.T) {
 
 	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
-			Name:      "test-pls",
+			Name:      "private-router",
 			Namespace: "test-ns",
 		},
 	}
@@ -310,7 +315,7 @@ func TestReconcile_WhenPLSAlreadyExists_ItShouldUpdateStatus(t *testing.T) {
 			Namespace:  "test-ns",
 			Finalizers: []string{azurePLSFinalizer},
 			Annotations: map[string]string{
-				supportutil.HostedClusterAnnotation: "test-ns/test-cluster",
+				k8sutil.HostedClusterAnnotation: "test-ns/test-cluster",
 			},
 		},
 		Spec: hyperv1.AzurePrivateLinkServiceSpec{
@@ -587,7 +592,7 @@ func TestReconcile_WhenLoadBalancerIPNotSet_ItShouldRequeue(t *testing.T) {
 			Namespace:  "test-ns",
 			Finalizers: []string{azurePLSFinalizer},
 			Annotations: map[string]string{
-				supportutil.HostedClusterAnnotation: "test-ns/test-cluster",
+				k8sutil.HostedClusterAnnotation: "test-ns/test-cluster",
 			},
 		},
 		Spec: hyperv1.AzurePrivateLinkServiceSpec{
@@ -631,25 +636,40 @@ func TestReconcile_WhenLoadBalancerIPNotSet_ItShouldRequeue(t *testing.T) {
 
 func TestConstructPLSName(t *testing.T) {
 	tests := []struct {
-		name      string
-		clusterID string
-		expected  string
+		name        string
+		clusterID   string
+		serviceName string
+		expected    string
 	}{
 		{
-			name:      "When given a cluster ID, it should construct pls-<clusterID>",
-			clusterID: "12345678-abcd-1234-abcd-123456789012",
-			expected:  "pls-12345678-abcd-1234-abcd-123456789012",
+			name:        "When given private-router service, it should use legacy pls-<clusterID> format",
+			clusterID:   "12345678-abcd-1234-abcd-123456789012",
+			serviceName: "private-router",
+			expected:    "pls-12345678-abcd-1234-abcd-123456789012",
 		},
 		{
-			name:      "When given a short cluster ID, it should construct valid PLS name",
-			clusterID: "abc",
-			expected:  "pls-abc",
+			name:        "When given oauth-openshift service, it should use pls-<serviceName>-<clusterID> format",
+			clusterID:   "12345678-abcd-1234-abcd-123456789012",
+			serviceName: "oauth-openshift",
+			expected:    "pls-oauth-openshift-12345678-abcd-1234-abcd-123456789012",
+		},
+		{
+			name:        "When given a short cluster ID with private-router, it should construct valid legacy PLS name",
+			clusterID:   "abc",
+			serviceName: "private-router",
+			expected:    "pls-abc",
+		},
+		{
+			name:        "When given a short cluster ID with a non-private-router service, it should include service name",
+			clusterID:   "abc",
+			serviceName: "my-service",
+			expected:    "pls-my-service-abc",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := constructPLSName(tt.clusterID)
+			result := constructPLSName(tt.clusterID, tt.serviceName)
 			if result != tt.expected {
 				t.Errorf("expected %s, got %s", tt.expected, result)
 			}
@@ -891,7 +911,7 @@ func TestReconcile_WhenAdditionalAllowedSubscriptionsChange_ItShouldUpdatePLS(t 
 			Namespace:  "test-ns",
 			Finalizers: []string{azurePLSFinalizer},
 			Annotations: map[string]string{
-				supportutil.HostedClusterAnnotation: "test-ns/test-cluster",
+				k8sutil.HostedClusterAnnotation: "test-ns/test-cluster",
 			},
 		},
 		Spec: hyperv1.AzurePrivateLinkServiceSpec{
@@ -958,15 +978,40 @@ func TestReconcile_WhenAdditionalAllowedSubscriptionsChange_ItShouldUpdatePLS(t 
 		t.Errorf("unexpected error: %v", err)
 	}
 
+	g := NewWithT(t)
+
 	// BeginCreateOrUpdate should be called to update visibility/auto-approval
-	if !plsMock.createCalled {
-		t.Error("expected BeginCreateOrUpdate to be called for subscription update")
-	}
+	g.Expect(plsMock.createCalled).To(BeTrue(), "expected BeginCreateOrUpdate to be called for subscription update")
+
+	// Verify the PLS was updated with the correct visibility and auto-approval subscriptions.
+	// The desired subscriptions are: the CR's SubscriptionID (sub-123) + AdditionalAllowed (sub-456, sub-789).
+	g.Expect(plsMock.lastCreateParams.Properties).ToNot(BeNil())
+	g.Expect(plsMock.lastCreateParams.Properties.Visibility).ToNot(BeNil())
+	g.Expect(plsMock.lastCreateParams.Properties.AutoApproval).ToNot(BeNil())
+
+	visibilitySubs := derefStringSlice(plsMock.lastCreateParams.Properties.Visibility.Subscriptions)
+	autoApprovalSubs := derefStringSlice(plsMock.lastCreateParams.Properties.AutoApproval.Subscriptions)
+
+	// buildAllowedSubscriptions derives the list from the guest subnet's subscription (sub-456)
+	// plus AdditionalAllowedSubscriptions (sub-456, sub-789), deduplicating sub-456.
+	g.Expect(visibilitySubs).To(ConsistOf("sub-456", "sub-789"),
+		"visibility subscriptions should include guest subscription + additional allowed subscriptions")
+	g.Expect(autoApprovalSubs).To(ConsistOf("sub-456", "sub-789"),
+		"auto-approval subscriptions should match visibility subscriptions")
 
 	// Nil poller means requeue after PLSRequeueInterval
-	if result.RequeueAfter != azureutil.PLSRequeueInterval {
-		t.Errorf("expected RequeueAfter=%v for nil poller, got %v", azureutil.PLSRequeueInterval, result.RequeueAfter)
+	g.Expect(result.RequeueAfter).To(Equal(azureutil.PLSRequeueInterval))
+}
+
+// derefStringSlice dereferences a slice of string pointers.
+func derefStringSlice(ptrs []*string) []string {
+	out := make([]string, 0, len(ptrs))
+	for _, p := range ptrs {
+		if p != nil {
+			out = append(out, *p)
+		}
 	}
+	return out
 }
 
 func TestReconcile_WhenAdditionalAllowedSubscriptionsMatch_ItShouldNotUpdatePLS(t *testing.T) {
@@ -986,7 +1031,7 @@ func TestReconcile_WhenAdditionalAllowedSubscriptionsMatch_ItShouldNotUpdatePLS(
 			Namespace:  "test-ns",
 			Finalizers: []string{azurePLSFinalizer},
 			Annotations: map[string]string{
-				supportutil.HostedClusterAnnotation: "test-ns/test-cluster",
+				k8sutil.HostedClusterAnnotation: "test-ns/test-cluster",
 			},
 		},
 		Spec: hyperv1.AzurePrivateLinkServiceSpec{
@@ -1592,5 +1637,260 @@ func TestDelete_WhenPLSAlreadyDeleted_ItShouldReturnCompleted(t *testing.T) {
 	}
 	if !completed {
 		t.Error("expected deletion to be completed")
+	}
+}
+
+// mockSubnetsAPI implements SubnetsAPI for testing
+type mockSubnetsAPI struct {
+	getResponse armnetwork.SubnetsClientGetResponse
+	getErr      error
+	createErr   error
+	subnets     []*armnetwork.Subnet
+}
+
+func (m *mockSubnetsAPI) Get(_ context.Context, _ string, _ string, _ string, _ *armnetwork.SubnetsClientGetOptions) (armnetwork.SubnetsClientGetResponse, error) {
+	return m.getResponse, m.getErr
+}
+
+func (m *mockSubnetsAPI) BeginCreateOrUpdate(_ context.Context, _ string, _ string, _ string, _ armnetwork.Subnet, _ *armnetwork.SubnetsClientBeginCreateOrUpdateOptions) (*azruntime.Poller[armnetwork.SubnetsClientCreateOrUpdateResponse], error) {
+	if m.createErr != nil {
+		return nil, m.createErr
+	}
+	return nil, nil
+}
+
+func (m *mockSubnetsAPI) NewListPager(_ string, _ string, _ *armnetwork.SubnetsClientListOptions) *azruntime.Pager[armnetwork.SubnetsClientListResponse] {
+	return azruntime.NewPager(azruntime.PagingHandler[armnetwork.SubnetsClientListResponse]{
+		More: func(page armnetwork.SubnetsClientListResponse) bool {
+			return false
+		},
+		Fetcher: func(ctx context.Context, page *armnetwork.SubnetsClientListResponse) (armnetwork.SubnetsClientListResponse, error) {
+			return armnetwork.SubnetsClientListResponse{
+				SubnetListResult: armnetwork.SubnetListResult{
+					Value: m.subnets,
+				},
+			}, nil
+		},
+	})
+}
+
+func TestEnsureNATSubnet(t *testing.T) {
+	const (
+		testILBSubnetID = "/subscriptions/sub-123/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/vnet-test/subnets/worker-subnet"
+		testInfraID     = "test-infra"
+		testSubnetName  = testInfraID + "-pls-nat"
+	)
+
+	testHC := &hyperv1.HostedCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster",
+			Namespace: "test-ns",
+		},
+		Spec: hyperv1.HostedClusterSpec{
+			InfraID: testInfraID,
+		},
+	}
+
+	tests := []struct {
+		name        string
+		subnetsMock *mockSubnetsAPI
+		expectedID  string
+		expectErr   bool
+		errContains string
+	}{
+		{
+			name: "When NAT subnet already exists, it should return existing subnet ID",
+			subnetsMock: &mockSubnetsAPI{
+				getResponse: armnetwork.SubnetsClientGetResponse{
+					Subnet: armnetwork.Subnet{
+						ID: to.Ptr("/subscriptions/sub-123/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/vnet-test/subnets/" + testSubnetName),
+					},
+				},
+			},
+			expectedID: "/subscriptions/sub-123/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/vnet-test/subnets/" + testSubnetName,
+			expectErr:  false,
+		},
+		{
+			name: "When Get returns a non-404 error, it should return the error",
+			subnetsMock: &mockSubnetsAPI{
+				getErr: fmt.Errorf("unexpected Azure API error"),
+			},
+			expectErr:   true,
+			errContains: "failed to check for existing NAT subnet",
+		},
+		{
+			name: "When subnet does not exist and BeginCreateOrUpdate fails, it should return the error",
+			subnetsMock: &mockSubnetsAPI{
+				getErr:    newAzureNotFoundError(),
+				createErr: fmt.Errorf("insufficient permissions"),
+				subnets:   []*armnetwork.Subnet{},
+			},
+			expectErr:   true,
+			errContains: "failed to create NAT subnet",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			r := &AzurePrivateLinkServiceController{
+				Subnets: tt.subnetsMock,
+			}
+
+			subnetID, err := r.ensureNATSubnet(context.Background(), testHC, testILBSubnetID)
+			if tt.expectErr {
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(err.Error()).To(ContainSubstring(tt.errContains))
+			} else {
+				g.Expect(err).ToNot(HaveOccurred())
+				g.Expect(subnetID).To(Equal(tt.expectedID))
+			}
+		})
+	}
+}
+
+func TestOverlapsAny(t *testing.T) {
+	tests := []struct {
+		name      string
+		candidate string
+		existing  []string
+		expected  bool
+	}{
+		{
+			name:      "When candidate does not overlap with any existing CIDR, it should return false",
+			candidate: "10.0.2.0/24",
+			existing:  []string{"10.0.0.0/24", "10.0.1.0/24"},
+			expected:  false,
+		},
+		{
+			name:      "When candidate exactly matches an existing CIDR, it should return true",
+			candidate: "10.0.1.0/24",
+			existing:  []string{"10.0.0.0/24", "10.0.1.0/24"},
+			expected:  true,
+		},
+		{
+			name:      "When candidate is contained within a larger existing CIDR, it should return true",
+			candidate: "10.0.1.0/24",
+			existing:  []string{"10.0.0.0/16"},
+			expected:  true,
+		},
+		{
+			name:      "When candidate contains a smaller existing CIDR, it should return true",
+			candidate: "10.0.0.0/16",
+			existing:  []string{"10.0.1.0/24"},
+			expected:  true,
+		},
+		{
+			name:      "When existing CIDRs list is empty, it should return false",
+			candidate: "10.0.1.0/24",
+			existing:  []string{},
+			expected:  false,
+		},
+		{
+			name:      "When candidate is in a completely different address space, it should return false",
+			candidate: "192.168.0.0/24",
+			existing:  []string{"10.0.0.0/24", "10.0.1.0/24"},
+			expected:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			_, candidateCIDR, err := net.ParseCIDR(tt.candidate)
+			g.Expect(err).ToNot(HaveOccurred())
+
+			var existingCIDRs []*net.IPNet
+			for _, cidr := range tt.existing {
+				_, parsed, err := net.ParseCIDR(cidr)
+				g.Expect(err).ToNot(HaveOccurred())
+				existingCIDRs = append(existingCIDRs, parsed)
+			}
+
+			result := overlapsAny(candidateCIDR, existingCIDRs)
+			g.Expect(result).To(Equal(tt.expected))
+		})
+	}
+}
+
+func TestFindAvailableCIDR(t *testing.T) {
+	tests := []struct {
+		name         string
+		subnets      []*armnetwork.Subnet
+		expectedCIDR string
+		expectedErr  bool
+	}{
+		{
+			name: "When only the default subnet exists, it should return 10.0.1.0/24",
+			subnets: []*armnetwork.Subnet{
+				{
+					Properties: &armnetwork.SubnetPropertiesFormat{
+						AddressPrefix: to.Ptr("10.0.0.0/24"),
+					},
+				},
+			},
+			expectedCIDR: "10.0.1.0/24",
+		},
+		{
+			name:         "When no subnets exist, it should return 10.0.1.0/24",
+			subnets:      []*armnetwork.Subnet{},
+			expectedCIDR: "10.0.1.0/24",
+		},
+		{
+			name: "When the first few /24 blocks are taken, it should skip them and return the next available",
+			subnets: []*armnetwork.Subnet{
+				{
+					Properties: &armnetwork.SubnetPropertiesFormat{
+						AddressPrefix: to.Ptr("10.0.0.0/24"),
+					},
+				},
+				{
+					Properties: &armnetwork.SubnetPropertiesFormat{
+						AddressPrefix: to.Ptr("10.0.1.0/24"),
+					},
+				},
+				{
+					Properties: &armnetwork.SubnetPropertiesFormat{
+						AddressPrefix: to.Ptr("10.0.2.0/24"),
+					},
+				},
+			},
+			expectedCIDR: "10.0.3.0/24",
+		},
+		{
+			name: "When a larger CIDR overlaps with candidate blocks, it should skip overlapping candidates",
+			subnets: []*armnetwork.Subnet{
+				{
+					Properties: &armnetwork.SubnetPropertiesFormat{
+						AddressPrefix: to.Ptr("10.0.0.0/16"),
+					},
+				},
+			},
+			expectedErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			subnetsMock := &mockSubnetsAPI{
+				subnets: tt.subnets,
+			}
+
+			r := &AzurePrivateLinkServiceController{
+				Subnets: subnetsMock,
+			}
+
+			cidr, err := r.findAvailableCIDR(context.Background(), "rg-test", "vnet-test")
+			if tt.expectedErr {
+				g.Expect(err).To(HaveOccurred())
+			} else {
+				g.Expect(err).ToNot(HaveOccurred())
+				g.Expect(cidr).To(Equal(tt.expectedCIDR))
+			}
+		})
 	}
 }

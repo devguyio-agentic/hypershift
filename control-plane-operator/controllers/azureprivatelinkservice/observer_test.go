@@ -8,7 +8,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	supportutil "github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/k8sutil"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -56,6 +56,7 @@ func TestControllerName(t *testing.T) {
 }
 
 func TestReconcile(t *testing.T) {
+	t.Parallel()
 	const (
 		testNamespace     = "clusters-test-hcp"
 		testServiceName   = "private-router"
@@ -78,7 +79,7 @@ func TestReconcile(t *testing.T) {
 				Namespace: testNamespace,
 				UID:       testHCPUID,
 				Annotations: map[string]string{
-					supportutil.HostedClusterAnnotation: "clusters/test-cluster",
+					k8sutil.HostedClusterAnnotation: "clusters/test-cluster",
 				},
 			},
 			Spec: hyperv1.HostedControlPlaneSpec{
@@ -192,6 +193,45 @@ func TestReconcile(t *testing.T) {
 			expectPLSCreated: false,
 		},
 		{
+			name:        "When service has no OwnerReference, it should return an error",
+			serviceName: testServiceName,
+			requestName: testServiceName,
+			service: func() *corev1.Service {
+				svc := defaultService()
+				svc.OwnerReferences = nil
+				return svc
+			}(),
+			hcp:              defaultHCP(),
+			expectError:      true,
+			expectPLSCreated: false,
+		},
+		{
+			name:        "When HCP has nil Azure platform it should return an error",
+			serviceName: testServiceName,
+			requestName: testServiceName,
+			service:     defaultService(),
+			hcp: func() *hyperv1.HostedControlPlane {
+				hcp := defaultHCP()
+				hcp.Spec.Platform.Azure = nil
+				return hcp
+			}(),
+			expectError:      true,
+			expectPLSCreated: false,
+		},
+		{
+			name:        "When HCP has empty private connectivity type it should return an error",
+			serviceName: testServiceName,
+			requestName: testServiceName,
+			service:     defaultService(),
+			hcp: func() *hyperv1.HostedControlPlane {
+				hcp := defaultHCP()
+				hcp.Spec.Platform.Azure.Private.Type = ""
+				return hcp
+			}(),
+			expectError:      true,
+			expectPLSCreated: false,
+		},
+		{
 			name:        "When CR already exists, it should update loadBalancerIP",
 			serviceName: testServiceName,
 			requestName: testServiceName,
@@ -227,8 +267,9 @@ func TestReconcile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			g := NewGomegaWithT(t)
-			ctx := context.Background()
+			ctx := t.Context()
 
 			// Create fake client with initial objects
 			scheme := runtime.NewScheme()
@@ -302,7 +343,7 @@ func TestReconcile(t *testing.T) {
 				g.Expect(azurePLS.OwnerReferences[0].Name).To(Equal(testHCPName))
 
 				// Verify HostedCluster annotation is copied
-				g.Expect(azurePLS.Annotations).To(HaveKeyWithValue(supportutil.HostedClusterAnnotation, "clusters/test-cluster"))
+				g.Expect(azurePLS.Annotations).To(HaveKeyWithValue(k8sutil.HostedClusterAnnotation, "clusters/test-cluster"))
 			} else {
 				// Verify no AzurePrivateLinkService was created
 				azurePLSList := &hyperv1.AzurePrivateLinkServiceList{}
@@ -314,6 +355,111 @@ func TestReconcile(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBaseDomainFromServices(t *testing.T) {
+	t.Parallel()
+
+	const clusterName = "my-cluster"
+
+	tests := []struct {
+		name     string
+		services []hyperv1.ServicePublishingStrategyMapping
+		expected string
+	}{
+		{
+			name: "When OAuth uses Route with hostname, it should extract base domain from route hostname",
+			services: []hyperv1.ServicePublishingStrategyMapping{
+				{
+					Service: hyperv1.OAuthServer,
+					ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+						Route: &hyperv1.RoutePublishingStrategy{
+							Hostname: "oauth-my-cluster.example.hypershift.com",
+						},
+					},
+				},
+			},
+			expected: "example.hypershift.com",
+		},
+		{
+			name: "When OAuth uses LoadBalancer with hostname, it should extract base domain from LB hostname",
+			services: []hyperv1.ServicePublishingStrategyMapping{
+				{
+					Service: hyperv1.OAuthServer,
+					ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+						LoadBalancer: &hyperv1.LoadBalancerPublishingStrategy{
+							Hostname: "oauth-my-cluster.lb.example.com",
+						},
+					},
+				},
+			},
+			expected: "lb.example.com",
+		},
+		{
+			name: "When OAuth has no hostname on either Route or LoadBalancer, it should return empty string",
+			services: []hyperv1.ServicePublishingStrategyMapping{
+				{
+					Service: hyperv1.OAuthServer,
+					ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+						Route:        &hyperv1.RoutePublishingStrategy{},
+						LoadBalancer: &hyperv1.LoadBalancerPublishingStrategy{},
+					},
+				},
+			},
+			expected: "",
+		},
+		{
+			name: "When no OAuthServer service exists, it should return empty string",
+			services: []hyperv1.ServicePublishingStrategyMapping{
+				{
+					Service: hyperv1.APIServer,
+					ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+						Route: &hyperv1.RoutePublishingStrategy{
+							Hostname: "oauth-my-cluster.example.com",
+						},
+					},
+				},
+			},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			g := NewWithT(t)
+			result := baseDomainFromServices(tt.services, clusterName)
+			g.Expect(result).To(Equal(tt.expected))
+		})
+	}
+}
+
+func TestReconcile_WhenServiceNotFound_ItShouldReturnNoError(t *testing.T) {
+	t.Parallel()
+	g := NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = hyperv1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	observer := &AzurePrivateLinkServiceObserver{
+		Client:           fakeClient,
+		ControllerName:   "test-observer",
+		ServiceName:      "private-router",
+		ServiceNamespace: "test-ns",
+		HCPNamespace:     "test-ns",
+	}
+
+	result, err := observer.Reconcile(t.Context(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "private-router", Namespace: "test-ns"},
+	})
+
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(result.IsZero()).To(BeTrue())
 }
 
 // mockCreateOrUpdateProvider implements CreateOrUpdateProvider for testing

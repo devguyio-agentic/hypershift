@@ -28,12 +28,14 @@ package azure
 import (
 	"context"
 	"fmt"
+	"net"
 	"slices"
 	"sort"
 	"time"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/support/azureutil"
+	"github.com/openshift/hypershift/support/k8sutil"
 	supportutil "github.com/openshift/hypershift/support/util"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
@@ -102,6 +104,7 @@ type LoadBalancersAPI interface {
 type SubnetsAPI interface {
 	Get(ctx context.Context, resourceGroupName string, virtualNetworkName string, subnetName string, options *armnetwork.SubnetsClientGetOptions) (armnetwork.SubnetsClientGetResponse, error)
 	BeginCreateOrUpdate(ctx context.Context, resourceGroupName string, virtualNetworkName string, subnetName string, subnetParameters armnetwork.Subnet, options *armnetwork.SubnetsClientBeginCreateOrUpdateOptions) (*azruntime.Poller[armnetwork.SubnetsClientCreateOrUpdateResponse], error)
+	NewListPager(resourceGroupName string, virtualNetworkName string, options *armnetwork.SubnetsClientListOptions) *azruntime.Pager[armnetwork.SubnetsClientListResponse]
 }
 
 // AzurePrivateLinkServiceController reconciles AzurePrivateLinkService resources.
@@ -183,7 +186,7 @@ func (r *AzurePrivateLinkServiceController) Reconcile(ctx context.Context, req c
 	}
 
 	// 4. Find the hosted cluster using annotation (set by CPO-side observer)
-	hc, err := supportutil.HostedClusterFromAnnotation(ctx, r.Client, azPLS)
+	hc, err := k8sutil.HostedClusterFromAnnotation(ctx, r.Client, azPLS)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get hosted cluster: %w", err)
 	}
@@ -210,7 +213,7 @@ func (r *AzurePrivateLinkServiceController) Reconcile(ctx context.Context, req c
 // The PLS NAT IP is allocated from the dedicated NAT subnet specified in the CR.
 func (r *AzurePrivateLinkServiceController) reconcilePrivateLinkService(ctx context.Context, azPLS *hyperv1.AzurePrivateLinkService, hc *hyperv1.HostedCluster) (ctrl.Result, error) {
 	log := log.FromContext(ctx).WithValues("azureprivatelinkservice", azPLS.Name, "namespace", azPLS.Namespace)
-	plsName := constructPLSName(hc.Spec.ClusterID)
+	plsName := constructPLSName(hc.Spec.ClusterID, azPLS.Name)
 	if err := azureutil.ValidateAzureResourceName(plsName, "Private Link Service"); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -758,7 +761,8 @@ func (r *AzurePrivateLinkServiceController) handleAzureError(ctx context.Context
 // The ilbSubnetID identifies the subnet (and therefore VNet) where the ILB frontend IP lives.
 // The NAT subnet must be in the same VNet as the ILB (Azure requirement).
 // The subnet is named {infraID}-pls-nat and has privateLinkServiceNetworkPolicies disabled.
-// The address prefix 10.0.1.0/24 is used (the default VNet is 10.0.0.0/16 with default subnet at 10.0.0.0/24).
+// The CIDR is dynamically allocated by finding the next available /24 block in the VNet's
+// 10.0.0.0/16 address space that doesn't overlap with any existing subnet.
 func (r *AzurePrivateLinkServiceController) ensureNATSubnet(ctx context.Context, hc *hyperv1.HostedCluster, ilbSubnetID string) (string, error) {
 	// Parse the VNet name and resource group from the ILB's subnet ID.
 	// The subnet ID has the form: /subscriptions/.../resourceGroups/{rg}/providers/Microsoft.Network/virtualNetworks/{vnet}/subnets/{subnet}
@@ -783,11 +787,17 @@ func (r *AzurePrivateLinkServiceController) ensureNATSubnet(ctx context.Context,
 		return "", fmt.Errorf("failed to check for existing NAT subnet: %w", err)
 	}
 
+	// Find the next available /24 CIDR by listing existing subnets
+	addressPrefix, err := r.findAvailableCIDR(ctx, vnetRG, vnetName)
+	if err != nil {
+		return "", fmt.Errorf("failed to find available CIDR for NAT subnet: %w", err)
+	}
+
 	// Create the NAT subnet with privateLinkServiceNetworkPolicies disabled
 	disabled := armnetwork.VirtualNetworkPrivateLinkServiceNetworkPoliciesDisabled
 	subnetParams := armnetwork.Subnet{
 		Properties: &armnetwork.SubnetPropertiesFormat{
-			AddressPrefix:                     ptr.To("10.0.1.0/24"),
+			AddressPrefix:                     ptr.To(addressPrefix),
 			PrivateLinkServiceNetworkPolicies: &disabled,
 		},
 	}
@@ -813,10 +823,70 @@ func (r *AzurePrivateLinkServiceController) ensureNATSubnet(ctx context.Context,
 	return *result.ID, nil
 }
 
-// constructPLSName builds a unique Private Link Service name using the cluster ID.
-// Format: pls-{clusterID} (e.g., pls-12345678-abcd-1234-abcd-123456789012)
+// findAvailableCIDR lists all existing subnets in the VNet and returns the next
+// available /24 CIDR block that doesn't overlap with any of them. It scans
+// candidate CIDRs starting from 10.0.1.0/24 within the 10.0.0.0/16 space
+// (skipping 10.0.0.0/24 which is the default subnet).
+func (r *AzurePrivateLinkServiceController) findAvailableCIDR(ctx context.Context, vnetRG, vnetName string) (string, error) {
+	// Collect all existing subnet CIDRs
+	var existingCIDRs []*net.IPNet
+	pager := r.Subnets.NewListPager(vnetRG, vnetName, nil)
+	for pager.More() {
+		listCtx, listCancel := context.WithTimeout(ctx, azureAPITimeout)
+		page, err := pager.NextPage(listCtx)
+		listCancel()
+		if err != nil {
+			return "", fmt.Errorf("failed to list subnets in VNet %s/%s: %w", vnetRG, vnetName, err)
+		}
+		for _, subnet := range page.Value {
+			if subnet.Properties != nil && subnet.Properties.AddressPrefix != nil {
+				_, cidr, err := net.ParseCIDR(*subnet.Properties.AddressPrefix)
+				if err != nil {
+					continue
+				}
+				existingCIDRs = append(existingCIDRs, cidr)
+			}
+		}
+	}
+
+	// Try /24 blocks starting at 10.0.1.0/24 (skip .0 which is the default subnet)
+	// through 10.0.255.0/24 (the last /24 in 10.0.0.0/16)
+	for i := 1; i < 256; i++ {
+		candidate := fmt.Sprintf("10.0.%d.0/24", i)
+		_, candidateCIDR, _ := net.ParseCIDR(candidate)
+
+		if !overlapsAny(candidateCIDR, existingCIDRs) {
+			return candidate, nil
+		}
+	}
+
+	return "", fmt.Errorf("no available /24 CIDR block in 10.0.0.0/16 for NAT subnet")
+}
+
+// overlapsAny returns true if the candidate CIDR overlaps with any of the existing CIDRs.
+// CIDR blocks are power-of-2 aligned, so two CIDRs either don't overlap at all or one
+// fully contains the other — checking if either base IP falls within the other network
+// is sufficient.
+func overlapsAny(candidate *net.IPNet, existing []*net.IPNet) bool {
+	for _, cidr := range existing {
+		if candidate.Contains(cidr.IP) || cidr.Contains(candidate.IP) {
+			return true
+		}
+	}
+	return false
+}
+
+// constructPLSName builds a unique Private Link Service name using the cluster ID and service name.
+// For backward compatibility, the original "private-router" service retains the legacy name format
+// pls-{clusterID} (e.g., pls-12345678-abcd-1234-abcd-123456789012).
+// All other services use the format pls-{serviceName}-{clusterID} (e.g., pls-oauth-openshift-{clusterID})
+// to differentiate multiple PLS resources (KAS vs OAuth) within the same cluster.
 // The cluster ID ensures uniqueness when multiple hosted clusters share a management resource group.
 // This follows the same pattern as GCP Private Service Connect (psc-{clusterID}).
-func constructPLSName(clusterID string) string {
-	return fmt.Sprintf("pls-%s", clusterID)
+func constructPLSName(clusterID, serviceName string) string {
+	// For backward compatibility, private-router uses the original name format
+	if serviceName == "private-router" {
+		return fmt.Sprintf("pls-%s", clusterID)
+	}
+	return fmt.Sprintf("pls-%s-%s", serviceName, clusterID)
 }
