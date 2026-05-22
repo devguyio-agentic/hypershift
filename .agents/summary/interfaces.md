@@ -53,6 +53,7 @@ The primary abstraction for multi-cloud support:
 | `ReconcileSecretEncryption()` | Set up KMS/encryption resources |
 | `CAPIProviderPolicyRules()` | Generate RBAC rules for CAPI provider |
 | `DeleteCredentials()` | Clean up credentials on deletion |
+| `DeleteOrphanedMachines()` | Remove finalizers from provider machines that have been deleted and are no longer associated with a node |
 
 Implementations: `platform/{aws,azure,gcp,ibmcloud,kubevirt,openstack,agent,powervs,none}/`
 
@@ -149,12 +150,7 @@ Primary validation mechanism — no new webhook validation allowed. CEL rules en
 - **Cross-field validation**: Mutually exclusive fields, conditional requirements
 - **Semantic rules**: Business logic constraints (e.g., "Ingress capability requires Console capability")
 
-Rule counts by type file:
-- `hostedcluster_types.go`: 76 rules
-- `etcdbackup_types.go`: 26 rules
-- `karpenter_types.go`: 25 rules
-- `azureprivatelinkservice_types.go`: 22 rules
-- `nodepool_types.go`: 19 rules
+Heaviest CEL usage is in `hostedcluster_types.go`, followed by `etcdbackup_types.go`, `karpenter_types.go`, `azureprivatelinkservice_types.go`, and `nodepool_types.go`.
 
 ### Feature Gates
 

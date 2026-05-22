@@ -60,6 +60,14 @@ Runs once on the management cluster with leader election (60s lease). Reconciles
 | GCPPrivateServiceConnectReconciler | GCPPrivateServiceConnect | - | GCP PSC (conditional) |
 | HCPEtcdBackupReconciler | HCPEtcdBackup | - | etcd backups (feature-gated) |
 | SharedIngressReconciler | - | - | Multi-tenant ingress (conditional) |
+| WebhookCertReconciler | Secret | - | Webhook server TLS certs (conditional on `--cert-dir`) |
+| hostedclustersizing.reconciler | HostedCluster | - | Applies t-shirt sizing labels (conditional on `ENABLE_SIZE_TAGGING=1`) |
+| hostedclustersizing.validator | HostedCluster | - | Validates sizing configuration |
+| supportedversion.Reconciler | ConfigMap | - | Maintains supported OCP versions ConfigMap |
+| uwmtelemetry.Reconciler | - | - | User Workload Monitoring telemetry remote write (conditional) |
+| proxy.reconciler | Proxy config | - | Watches proxy configuration on OpenShift mgmt clusters (conditional) |
+| auditlogpersistence.SnapshotReconciler | PVC snapshots | - | Audit log persistence snapshots (conditional on `ENABLE_AUDIT_LOG_PERSISTENCE`) |
+| resourcebasedcpautoscaler.Controller | HostedCluster + VPA | - | Resource-based control plane autoscaling via VPA (conditional) |
 
 **Scheduling Controllers** (conditional on `--enable-dedicated-request-serving-isolation`):
 - DedicatedServingComponentSchedulerAndSizer, PlaceholderScheduler, RequestServingNodeAutoscaler, MachineSetDescaler, NonRequestServingNodeAutoscaler (size-tagging mode)
@@ -67,9 +75,13 @@ Runs once on the management cluster with leader election (60s lease). Reconciles
 
 ### control-plane-operator (Per-Cluster)
 
-One CPO instance per hosted cluster, running in the HCP namespace. Multi-binary image dispatched via `argv[0]` symlink.
+One CPO instance per hosted cluster, running in the HCP namespace. Multi-binary image with two dispatch mechanisms:
 
-**Embedded binaries**: kas-bootstrap, ignition-server, konnectivity-socks5-proxy, konnectivity-https-proxy, availability-prober, token-minter, etcd-defrag-controller, etcd-upload, sync-fg-configmap, sync-global-pullsecret, endpoint-resolver, metrics-proxy, dns-resolver, etcd-backup, kubernetes-default-proxy, hosted-cluster-config-operator.
+**argv[0] dispatch** (13 entries in `commandFor()` switch): kas-bootstrap, ignition-server, konnectivity-socks5-proxy, konnectivity-https-proxy, availability-prober, token-minter, etcd-defrag-controller, etcd-upload, sync-fg-configmap, sync-global-pullsecret, fetch-etcd-certs, endpoint-resolver, metrics-proxy.
+
+**Subcommands** (via `AddCommand`, overlapping set): All of the above plus start (CPO itself), hosted-cluster-config-operator, kubernetes-default-proxy, dns-resolver, etcd-backup.
+
+**CPO controllers** (`control-plane-operator/controllers/`): HostedControlPlaneReconciler, HealthCheckUpdater, openshiftmanager.Reconciler, plus platform-specific private service controllers (AWS, Azure, GCP).
 
 **v2 Component Framework**: The CPO reconciles ~40 control plane components through a declarative framework (`support/controlplane-component/`):
 
@@ -80,11 +92,14 @@ One CPO instance per hosted cluster, running in the HCP namespace. Multi-binary 
 | Networking | cluster-network-operator, ingress-operator, dns-operator, konnectivity-agent |
 | Cloud Controllers | aws-ccm, azure-ccm, gcp-ccm, kubevirt-ccm, openstack-ccm, powervs-ccm |
 | Storage | storage-operator, kubevirt-csi, snapshot-controller |
-| Infrastructure | cloud-credential-operator, machine-approver, ignition-server, endpoint-resolver, metrics-proxy |
+| Infrastructure | cloud-credential-operator, machine-approver, ignition-server, ignition-server-proxy, endpoint-resolver, metrics-proxy |
 | Monitoring | node-tuning-operator, image-registry-operator |
+| Autoscaling | autoscaler, aws-node-termination-handler, karpenter, karpenter-operator |
+| CAPI | capi-manager, capi-provider |
 | OLM | catalog-operator, olm-operator, packageserver, collect-profiles |
 | PKI | pki-operator |
-| Config | feature-gate configmap, hosted-cluster-config-operator |
+| Config | feature-gate configmap, hosted-cluster-config-operator, control-plane-operator (self-management) |
+| Routing | router (ingress router) |
 
 ### control-plane-pki-operator
 
@@ -125,6 +140,7 @@ classDiagram
         +ReconcileSecretEncryption()
         +CAPIProviderPolicyRules()
         +DeleteCredentials()
+        +DeleteOrphanedMachines()
     }
     Platform <|-- AWS
     Platform <|-- Azure

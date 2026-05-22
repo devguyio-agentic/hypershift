@@ -15,7 +15,7 @@
 - **Binary**: `control-plane-operator` (multi-binary image)
 - **Cluster**: Management cluster (one per HCP namespace)
 - **Responsibility**: Orchestrates all control plane components for a single hosted cluster. Uses v2 component framework to manage ~40 components (etcd, KAS, KCM, scheduler, OAuth, CCMs, etc.)
-- **Controllers**: `control-plane-operator/controllers/` — HostedControlPlaneReconciler, HealthCheckUpdater, platform-specific private service controllers
+- **Controllers**: `control-plane-operator/controllers/` — HostedControlPlaneReconciler, HealthCheckUpdater, openshiftmanager.Reconciler, platform-specific private service controllers (awsprivatelink, azureprivatelinkservice, gcpprivateserviceconnect)
 - **Entry point**: `control-plane-operator/main.go` with argv[0] dispatch
 
 ### control-plane-pki-operator

@@ -130,8 +130,8 @@
 |--------|--------------|--------|
 | `sigs.k8s.io/controller-runtime` | v0.19.7 | webhook.Validator deprecation breakage in v0.20 |
 | `sigs.k8s.io/cluster-api` | `csrwng/cluster-api` fork | K8s API v0.34+ fuzzer compatibility |
-| `sigs.k8s.io/karpenter` | `openshift/karpenter` fork | OpenShift-specific patches |
-| `aws/karpenter-provider-aws` | `openshift/aws-karpenter-provider-aws` fork | OpenShift-specific patches |
+| `sigs.k8s.io/karpenter` | `github.com/openshift/kubernetes-sigs-karpenter` | OpenShift-specific patches |
+| `aws/karpenter-provider-aws` | `github.com/openshift/aws-karpenter-provider-aws` | OpenShift-specific patches |
 | `github.com/golang-jwt/jwt/v4` | v4.5.2 | CVE-2025-30204 fix |
 | `github.com/openshift/hypershift/api` | `./api` | Local multi-module development |
 

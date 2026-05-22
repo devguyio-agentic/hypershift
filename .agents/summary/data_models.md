@@ -106,7 +106,11 @@ Worker node pool. Shortnames: `np`, `nps`. Has scale subresource.
 
 ### HostedControlPlane
 
-Internal control plane representation. Shortnames: `hcp`, `hcps`. Mirrors HostedClusterSpec closely.
+Internal control plane representation. Shortnames: `hcp`, `hcps`. Primary input for the CPO.
+
+**Spec (key fields)**: releaseImage, controlPlaneReleaseImage, pullSecret, issuerURL, infraID, platform, dns, etcd, services, networking, configuration, operatorConfiguration, autoscaling, autoNode, fips, pausedUntil, capabilities. Closely mirrors HostedClusterSpec.
+
+**Status (key fields)**: conditions, ready, initialized, externalManagedControlPlane, controlPlaneEndpoint, controlPlaneVersion, versionStatus, kubeConfig, customKubeconfig, kubeadminPassword, platform, nodeCount, autoNode, configuration.
 
 ### ControlPlaneComponent
 
@@ -120,7 +124,11 @@ AWS VPC PrivateLink. Spec: networkLoadBalancerName, subnetIDs, resourceTags. Sta
 
 ### AzurePrivateLinkService
 
-Azure Private Link. Shortname: `azpls`. Spec: loadBalancerIP, subscriptionID, resourceGroupName, natSubnetID, guestSubnetID. Status: privateLinkServiceID, privateEndpointID, privateEndpointIP.
+Azure Private Link. Shortname: `azpls`.
+
+**Spec fields**: loadBalancerIP, subscriptionID, resourceGroupName, location, natSubnetID, additionalAllowedSubscriptions, guestSubnetID, guestVNetID, baseDomain.
+
+**Status fields**: conditions, internalLoadBalancerID, privateLinkServiceID, privateLinkServiceAlias, privateEndpointID, privateEndpointIP, privateDNSZoneID, dnsZoneName, baseDomainDNSZoneID.
 
 ### GCPPrivateServiceConnect
 

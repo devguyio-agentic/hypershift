@@ -59,6 +59,7 @@ The root module consumes the API module via a `replace` directive. After modifyi
 | OpenStack | Feature-gated | openstack-resource-controller |
 | GCP | Feature-gated | google.golang.org/api |
 | Agent | Supported | cluster-api-provider-agent |
+| None | Supported | No cloud SDK (bare-metal/testing) |
 
 ## Container Images
 
@@ -73,5 +74,5 @@ The root module consumes the API module via a `replace` directive. After modifyi
 
 - **Vendoring**: `go mod vendor` enforced (`GOFLAGS=-mod=vendor`)
 - **Workspace**: `hack/workspace/go.work` for local multi-module development
-- **Renovate**: Configured but currently disabled; full Go updates on main, patch-only on release branches
+- **Renovate**: Configured in `renovate.json`; when active, allows full Go updates on main, patch-only on release branches
 - **Security**: Snyk (excludes vendor/), gitleaks (secret scanning)

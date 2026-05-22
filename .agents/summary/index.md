@@ -35,9 +35,9 @@ This index serves as the primary entry point for AI assistants working with the 
 - Go 1.25.7, Kubernetes v0.35.1 APIs, controller-runtime v0.19.7
 - 4 operators: hypershift-operator, CPO, PKI operator, karpenter-operator
 - 6 binaries: hypershift, hcp, hypershift-operator, control-plane-operator, control-plane-pki-operator, karpenter-operator
-- 8 platforms: AWS, Azure, GCP, IBM Cloud, KubeVirt, OpenStack, Agent, PowerVS
-- 13 CRD kinds across 5 API groups
-- ~40 control plane components managed by CPO v2 framework
+- 9 platform implementations: AWS, Azure, GCP, IBM Cloud, KubeVirt, OpenStack, Agent, PowerVS, None
+- 14 CRD root type registrations (13 unique kind names) across 5 API groups
+- 39 control plane components managed by CPO v2 framework
 - Multi-module repo: root + api/ + hack/tools/
 
 ### Common Tasks Mapping
