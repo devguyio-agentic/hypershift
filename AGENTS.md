@@ -16,6 +16,29 @@ Project documentation is published via MkDocs. The site structure and navigation
 - **karpenter-operator**: Manages Karpenter resources for auto-scaling
 - **ignition-server**: Serves ignition configs for node bootstrapping
 
+### Component Map
+
+```mermaid
+graph TB
+    subgraph "Management Cluster"
+        HO[hypershift-operator<br/>hypershift-operator/]
+        HO -->|reconciles| HC[HostedCluster]
+        HO -->|reconciles| NP[NodePool]
+        HO -->|creates per-cluster| HCP_NS[HCP Namespace]
+
+        subgraph HCP_NS[HCP Namespace]
+            CPO[control-plane-operator<br/>control-plane-operator/]
+            PKI[control-plane-pki-operator<br/>control-plane-pki-operator/]
+            CPO -->|v2 framework| Components[~40 control plane components]
+        end
+    end
+
+    subgraph "Guest Cluster"
+        HCCO[hosted-cluster-config-operator]
+        KO[karpenter-operator<br/>karpenter-operator/]
+    end
+```
+
 ### Key Directories
 
 - `api/`: API definitions and CRDs for hypershift, scheduling, certificates, and karpenter
@@ -24,6 +47,54 @@ Project documentation is published via MkDocs. The site structure and navigation
 - `control-plane-operator/`: Control plane component management
 - `support/`: Shared utilities and libraries
 - `test/`: E2E and integration tests
+
+### Directory Organization
+
+```
+main.go                          # hypershift CLI entry point
+product-cli/                     # hcp CLI (production subset)
+hypershift-operator/
+  main.go                        # Operator binary (run, init, etcd-recovery subcommands)
+  controllers/
+    hostedcluster/               # HostedClusterReconciler
+      internal/platform/         # Platform interface + implementations (aws/, azure/, gcp/, ...)
+    nodepool/                    # NodePoolReconciler
+    ...
+control-plane-operator/
+  main.go                        # Multi-binary (argv[0] dispatch): CPO + 15 sidecar binaries
+  controllers/
+    hostedcontrolplane/
+      v2/                        # v2 component implementations (~40 components)
+        assets/                  # Embedded YAML manifests per component
+  hostedclusterconfigoperator/   # HCCO (runs in guest cluster)
+control-plane-pki-operator/      # PKI operator (library-go framework, not controller-runtime)
+karpenter-operator/              # Dual-cluster Karpenter management
+api/                             # SEPARATE Go module (github.com/openshift/hypershift/api)
+  hypershift/v1beta1/            # Core CRDs: HostedCluster, NodePool, HostedControlPlane, etc.
+  certificates/v1alpha1/         # CertificateRevocationRequest
+  scheduling/v1alpha1/           # ClusterSizingConfiguration
+  karpenter/v1/                  # OpenshiftEC2NodeClass
+  auditlogpersistence/v1alpha1/  # AuditLogPersistenceConfig
+client/                          # Generated clientsets, informers, listers, apply configs
+support/
+  controlplane-component/        # v2 component framework (core of CPO reconciliation)
+  upsert/                        # Idempotent create-or-update with loop detection
+  config/                        # Workload configuration (resources, scheduling, security)
+  awsapi/, azureutil/, gcpapi/   # Cloud provider client interfaces/utilities
+  releaseinfo/                   # OCP release image resolution and caching
+  capabilities/                  # Management cluster capability detection
+  netutil/                       # Service exposure strategies
+  konnectivityproxy/             # Konnectivity proxy dialer
+test/
+  e2e/                           # v1 E2E tests (Go testing + platform flags)
+  e2e/v2/                        # v2 E2E tests (Ginkgo BDD, stateless compliance)
+  envtest/                       # YAML-driven CRD validation (CEL) against real kube-apiserver
+  integration/                   # Kind-based integration tests
+hack/
+  tools/                         # Build tools module (golangci-lint, controller-gen, etc.)
+  workspace/                     # Go workspace (go.work) for multi-module dev
+  dev/                           # AWS development helpers
+```
 
 ### Platform Support
 
@@ -35,6 +106,27 @@ The codebase supports multiple platforms:
 - KubeVirt
 - OpenStack
 - Agent
+
+### Platform Abstraction
+
+Platform-specific logic is isolated via the `Platform` interface at `hypershift-operator/controllers/hostedcluster/internal/platform/platform.go`. Methods: `ReconcileCAPIInfraCR`, `CAPIProviderDeploymentSpec`, `ReconcileCredentials`, `ReconcileSecretEncryption`, `CAPIProviderPolicyRules`, `DeleteCredentials`. Implementations in `platform/{aws,azure,gcp,ibmcloud,kubevirt,openstack,agent,powervs,none}/`.
+
+Cloud controller managers in CPO: six platform-specific CCM components in `control-plane-operator/controllers/hostedcontrolplane/v2/cloud_controller_manager/`, each with platform predicates.
+
+### v2 Component Framework
+
+The CPO manages ~40 control plane components through a declarative framework in `support/controlplane-component/`. Components implement `ControlPlaneComponent` interface via fluent builder:
+```go
+NewDeploymentComponent("name", opts).WithAdaptFunction(adapt).InjectKonnectivityContainer(...).Build()
+```
+Components declare dependencies; reconciliation blocks until deps are `Available` and `RolloutComplete`. Manifests are embedded YAML in `control-plane-operator/controllers/hostedcontrolplane/v2/assets/{component}/`.
+
+### Private Cluster Connectivity
+
+Three parallel implementations for private clusters:
+- **AWS**: VPC PrivateLink — `AWSEndpointService` CRD, controllers in both HO and CPO
+- **Azure**: Private Link Services — `AzurePrivateLinkService` CRD, Private DNS Zones
+- **GCP**: Private Service Connect — `GCPPrivateServiceConnect` CRD (feature-gated: `GCPPlatform`)
 
 ## Development Commands
 
@@ -184,6 +276,39 @@ This means:
 - Running `go build ./...` or `go vet ./...` from the repository root will **not** compile the `api/` module — it is a separate module. To build/vet the API module, run commands from within the `api/` directory.
 - The `hack/workspace/` directory contains a Go workspace configuration (`go.work`) that can be used for local development across both modules.
 
+### Notable Replace Directives
+
+- `sigs.k8s.io/controller-runtime` pinned to v0.19.7 (not v0.22.4) due to `webhook.Validator` deprecation breakage in v0.20
+- `sigs.k8s.io/cluster-api` replaced with `csrwng/cluster-api` fork for K8s API v0.34+ fuzzer compatibility
+- `github.com/golang-jwt/jwt/v4` force-upgraded to v4.5.2 for CVE-2025-30204
+
+## CI Configuration
+
+### GitHub Actions
+
+- **test**: Sharded unit tests with race detection and Codecov upload
+- **verify**: Full verification (`make generate update`, staticcheck, fmt, vet)
+- **lint**: golangci-lint with kube-api-linter plugin
+- **envtest-ocp/envtest-kube**: CRD validation across K8s version matrices
+- **codespell**: Spell checking
+- **gitlint**: Commit message format validation
+- **docs-build**: MkDocs documentation build
+
+### Tekton/Konflux
+
+Pipeline definitions in `.tekton/` build container images for: hypershift-operator, control-plane-operator, hypershift-cli, hypershift-release, shared-ingress, GitHub Actions runner, gomaxprocs-webhook.
+
+### Linting
+
+- Root module: golangci-lint v2 with `gocyclo` (complexity 30), `misspell` (US), `unparam`
+- API module: Separate `.golangci.yml` with `kube-api-linter` Go plugin enforcing OpenShift API conventions (naming, markers, conditions, optional/required fields)
+- Import ordering: standard → dot → hypershift → openshift → aws → Azure → k8s.io → sigs → default
+
+### Pre-commit Hooks
+
+- **pre-commit**: check-merge-conflict, check-yaml, trailing-whitespace, codespell, CPO containerfile sync, lint-fix
+- **pre-push**: `make verify`, `make test`
+
 ## Common Gotchas
 
 - **`api/` is a separate Go module**: Always run `make update` after modifying types in the `api/` package. See [Multi-Module Structure](#multi-module-structure) above for details.
@@ -191,6 +316,8 @@ This means:
 - Use `make verify` before submitting PRs to catch formatting/generation issues.
 - Platform-specific controllers require their respective cloud credentials for testing.
 - E2E tests need proper cloud infrastructure setup (S3 buckets, DNS zones, etc.).
+- **CPO is a multi-binary image**: argv[0] determines which binary runs. Adding a new sidecar requires updating the `commandFor()` dispatch in `control-plane-operator/main.go`.
+- **PKI operator uses library-go**: Not controller-runtime like the other operators. Uses `controllercmd.ControllerCommandConfig`.
 
 ## Commit Messages
 
@@ -232,3 +359,8 @@ After addressing review feedback, use the `restructure-hypershift-commits` skill
 - Prefer Gherkin Syntax to define unit test cases, e.g. "When... it should..."
 - Prefer gomega for unit test assertions
 
+## Custom Instructions
+
+<!-- This section is maintained by developers and agents during day-to-day work.
+     It is NOT auto-generated by codebase-summary and MUST be preserved during refreshes.
+     Add project-specific conventions, gotchas, and workflow requirements here. -->
