@@ -734,7 +734,7 @@ func TestGetWindowsAMI(t *testing.T) {
 					},
 				},
 			},
-			expectedError: "no aws-winli regions data found in release image metadata",
+			expectedError: "no aws-winli regions data found in release image metadata; Windows NodePools require OCP 4.19.18+, 4.20.5+, or 4.21.0+",
 		},
 		{
 			name:   "unsupported region",
