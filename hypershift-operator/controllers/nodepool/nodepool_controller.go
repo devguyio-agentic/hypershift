@@ -102,11 +102,13 @@ type NodePoolReconciler struct {
 	recorder        record.EventRecorder
 	ReleaseProvider releaseinfo.Provider
 	upsert.CreateOrUpdateProvider
-	HypershiftOperatorImage string
-	ImageMetadataProvider   supportutil.ImageMetadataProvider
-	KubevirtInfraClients    kvinfra.KubevirtInfraClientMap
-	EC2Client               awsapi.EC2API
-	InstanceTypeProvider    instancetype.Provider
+	HypershiftOperatorImage              string
+	ImageMetadataProvider                supportutil.ImageMetadataProvider
+	KubevirtInfraClients                 kvinfra.KubevirtInfraClientMap
+	EC2Client                            awsapi.EC2API
+	InstanceTypeProvider                 instancetype.Provider
+	MaxConcurrentReconciles              int
+	SecretJanitorMaxConcurrentReconciles int
 }
 
 type NotReadyError struct {
@@ -143,7 +145,7 @@ func (r *NodePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.enqueueNodePoolsForConfig), builder.WithPredicates(supportutil.PredicatesForHostedClusterAnnotationScoping(mgr.GetClient()))).
 		WithOptions(controller.Options{
 			RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](1*time.Second, 10*time.Second),
-			MaxConcurrentReconciles: 10,
+			MaxConcurrentReconciles: r.MaxConcurrentReconciles,
 		})
 	for _, managedResource := range r.managedResources() {
 		bldr.Watches(managedResource, handler.EnqueueRequestsFromMapFunc(enqueueParentNodePool), builder.WithPredicates(supportutil.PredicatesForHostedClusterAnnotationScoping(mgr.GetClient())))
@@ -156,7 +158,7 @@ func (r *NodePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&corev1.Secret{}, builder.WithPredicates(supportutil.PredicatesForHostedClusterAnnotationScoping(mgr.GetClient()))).
 		WithOptions(controller.Options{
 			RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](1*time.Second, 10*time.Second),
-			MaxConcurrentReconciles: 10,
+			MaxConcurrentReconciles: r.SecretJanitorMaxConcurrentReconciles,
 		}).
 		Complete(&secretJanitor{
 			NodePoolReconciler: r,
@@ -186,6 +188,12 @@ func (r *NodePoolReconciler) managedResources() []client.Object {
 
 func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
+	reconcileStart := time.Now()
+	defer func() {
+		// Logs execution time at V(2); enable with --zap-log-level=2.
+		// Note: this measures execution time (dequeue→return), not queue wait time.
+		log.V(2).Info("NodePool reconcile finished", "duration", time.Since(reconcileStart).String())
+	}()
 
 	// Fetch the nodePool instance
 	nodePool := &hyperv1.NodePool{}
@@ -287,30 +295,35 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 	}
 
 	// Loop over all conditions.
-	// Order matter as conditions might choose to short circuit returning ctrl.Result or error.
-	signalConditions := []func(ctx context.Context, nodePool *hyperv1.NodePool, hcluster *hyperv1.HostedCluster) (*ctrl.Result, error){
-		r.autoscalerEnabledCondition,
-		r.updateManagementEnabledCondition,
-		r.releaseImageCondition,
-		r.ignitionEndpointAvailableCondition,
-		r.validArchPlatformCondition,
-		r.reconciliationActiveCondition,
-		// Conditition that depends on a valid release image.
-		r.supportedVersionSkewCondition,
-		r.validMachineConfigCondition,
-		r.updatingConfigCondition,
-		r.updatingVersionCondition,
-		// Conditition that depends on a valid config/token.
-		r.validGeneratedPayloadCondition,
-		r.reachedIgnitionEndpointCondition,
-		r.machineAndNodeConditions,
-		r.validPlatformConfigCondition,
+	type signalConditionFn struct {
+		name string
+		fn   func(ctx context.Context, nodePool *hyperv1.NodePool, hcluster *hyperv1.HostedCluster) (*ctrl.Result, error)
+	}
+
+	// Order matters: conditions may short-circuit by returning a non-nil *ctrl.Result.
+	signalConditions := []signalConditionFn{
+		{name: "AutoscalerEnabled", fn: r.autoscalerEnabledCondition},
+		{name: "UpdateManagementEnabled", fn: r.updateManagementEnabledCondition},
+		{name: "ReleaseImage", fn: r.releaseImageCondition},
+		{name: "IgnitionEndpointAvailable", fn: r.ignitionEndpointAvailableCondition},
+		{name: "ValidArchPlatform", fn: r.validArchPlatformCondition},
+		{name: "ReconciliationActive", fn: r.reconciliationActiveCondition},
+		// Condition that depends on a valid release image.
+		{name: "SupportedVersionSkew", fn: r.supportedVersionSkewCondition},
+		{name: "ValidMachineConfig", fn: r.validMachineConfigCondition},
+		{name: "UpdatingConfig", fn: r.updatingConfigCondition},
+		{name: "UpdatingVersion", fn: r.updatingVersionCondition},
+		// Conditions that depend on a valid config/token.
+		{name: "ValidGeneratedPayload", fn: r.validGeneratedPayloadCondition},
+		{name: "ReachedIgnitionEndpoint", fn: r.reachedIgnitionEndpointCondition},
+		{name: "MachineAndNode", fn: r.machineAndNodeConditions},
+		{name: "ValidPlatformConfig", fn: r.validPlatformConfigCondition},
 		// TODO(alberto): consider moving here:
 		// NodePoolUpdatingPlatformMachineTemplateConditionType,
 		// NodePoolAutorepairEnabledConditionType.
 	}
-	for _, f := range signalConditions {
-		result, err := f(ctx, nodePool, hcluster)
+	for _, sc := range signalConditions {
+		result, err := sc.fn(ctx, nodePool, hcluster)
 		if err != nil {
 			if result == nil {
 				return ctrl.Result{}, err
@@ -318,6 +331,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 			return *result, err
 		}
 		if result != nil {
+			log.V(2).Info("Reconcile short-circuited", "condition", sc.name, "result", result)
 			return *result, nil
 		}
 	}

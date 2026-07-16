@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -156,8 +157,11 @@ type StartOptions struct {
 	EnableDedicatedRequestServingIsolation bool
 	ScaleFromZeroProvider                  string
 	ScaleFromZeroCreds                     string
-	EtcdBackupMaxCount                     int
-	HCPEgressBlockCIDRs                    []string
+	EtcdBackupMaxCount                          int
+	HCPEgressBlockCIDRs                         []string
+	EnableReleaseImageLookupCache               bool
+	NodePoolMaxConcurrentReconciles             int
+	SecretJanitorMaxConcurrentReconciles        int
 }
 
 func NewStartCommand() *cobra.Command {
@@ -165,6 +169,14 @@ func NewStartCommand() *cobra.Command {
 		Use:   "run",
 		Short: "Runs the Hypershift operator",
 	}
+
+	// zapOpts holds the log configuration populated from --zap-* flags.
+	// BindFlags takes a stdlib *flag.FlagSet; AddGoFlagSet bridges to cobra's pflag.
+	// Registers: --zap-log-level, --zap-devel, --zap-encoder, --zap-stacktrace-level, --zap-time-encoding.
+	zapOpts := zap.Options{TimeEncoder: zapcore.RFC3339TimeEncoder}
+	zapGoFlags := flag.NewFlagSet("", flag.ContinueOnError)
+	zapOpts.BindFlags(zapGoFlags)
+	cmd.Flags().AddGoFlagSet(zapGoFlags)
 
 	opts := StartOptions{
 		Namespace:                        "hypershift",
@@ -199,6 +211,9 @@ func NewStartCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.ScaleFromZeroCreds, "scale-from-zero-creds", opts.ScaleFromZeroCreds, "Path to credentials file for scale-from-zero instance type queries")
 	cmd.Flags().IntVar(&opts.EtcdBackupMaxCount, "etcd-backup-max-count", 5, "Maximum number of completed HCPEtcdBackup CRs to retain per HostedControlPlane")
 	cmd.Flags().StringArrayVar(&opts.HCPEgressBlockCIDRs, "hcp-egress-block-cidrs", nil, "Static CIDRs to block in HCP namespace egress NetworkPolicies instead of dynamically-discovered hosting cluster KAS endpoint IPs. When specified, eliminates NetworkPolicy churn during hosting cluster KAS rolling restarts and avoids OVN port-group reconciliation races that can drop traffic to HCP routers. May be specified multiple times (e.g. --hcp-egress-block-cidrs=10.0.0.0/16 --hcp-egress-block-cidrs=10.1.0.0/16).")
+	cmd.Flags().BoolVar(&opts.EnableReleaseImageLookupCache, "enable-release-image-lookup-cache", false, "Cache release image Lookup() results to reduce mirror probe round-trips per NodePool reconcile. Safe to enable in production; results are TTL-cached for 5 minutes keyed by image+pull-secret.")
+	cmd.Flags().IntVar(&opts.NodePoolMaxConcurrentReconciles, "nodepool-max-concurrent-reconciles", 10, "Maximum number of concurrent NodePool reconciles. Increase on management clusters with many NodePools to reduce head-of-line blocking. Must be > 0.")
+	cmd.Flags().IntVar(&opts.SecretJanitorMaxConcurrentReconciles, "secret-janitor-max-concurrent-reconciles", 10, "Maximum number of concurrent Secret janitor reconciles. Must be > 0.")
 
 	// Attempt to determine featureset prior to adding featuregate flags.
 	// It is safe to get the empty string from this as the empty string is the default featureset.
@@ -213,6 +228,16 @@ func NewStartCommand() *cobra.Command {
 	featuregate.Gate().AddFlag(cmd.Flags())
 
 	cmd.Run = func(cmd *cobra.Command, args []string) {
+		// Override logger with user-configured options now that flags are parsed.
+		// Startup code before this point uses the default JSON+RFC3339 logger set in main().
+		ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
+
+		// Validate flags before registering any defers so os.Exit doesn't skip cleanup.
+		if opts.NodePoolMaxConcurrentReconciles <= 0 || opts.SecretJanitorMaxConcurrentReconciles <= 0 {
+			fmt.Fprintln(os.Stderr, "ERROR: --nodepool-max-concurrent-reconciles and --secret-janitor-max-concurrent-reconciles must be > 0")
+			os.Exit(1)
+		}
+
 		ctx, cancel := context.WithCancel(ctrl.SetupSignalHandler())
 		defer cancel()
 
@@ -300,7 +325,7 @@ func run(ctx context.Context, opts *StartOptions, log logr.Logger) error {
 		return fmt.Errorf("failed to reconcile encryption rotation guard ValidatingAdmissionPolicy: %w", err)
 	}
 
-	registryProvider, err := globalconfig.NewCommonRegistryProvider(ctx, mgmtClusterCaps, apiReadingClient, opts.RegistryOverrides)
+	registryProvider, err := globalconfig.NewCommonRegistryProvider(ctx, mgmtClusterCaps, apiReadingClient, opts.RegistryOverrides, opts.EnableReleaseImageLookupCache)
 	if err != nil {
 		return fmt.Errorf("failed to create registry provider: %w", err)
 	}
@@ -630,14 +655,16 @@ func setupNodePoolController(ctx context.Context, mgr ctrl.Manager, opts *StartO
 	}
 
 	if err := (&nodepool.NodePoolReconciler{
-		Client:                  mgr.GetClient(),
-		ReleaseProvider:         registryProvider.ReleaseProvider,
-		CreateOrUpdateProvider:  createOrUpdate,
-		HypershiftOperatorImage: operatorImage,
-		ImageMetadataProvider:   registryProvider.MetadataProvider,
-		KubevirtInfraClients:    kvinfra.NewKubevirtInfraClientMap(),
-		EC2Client:               ec2Client,
-		InstanceTypeProvider:    instanceTypeProvider,
+		Client:                              mgr.GetClient(),
+		ReleaseProvider:                     registryProvider.ReleaseProvider,
+		CreateOrUpdateProvider:              createOrUpdate,
+		HypershiftOperatorImage:             operatorImage,
+		ImageMetadataProvider:               registryProvider.MetadataProvider,
+		KubevirtInfraClients:                kvinfra.NewKubevirtInfraClientMap(),
+		EC2Client:                           ec2Client,
+		InstanceTypeProvider:                instanceTypeProvider,
+		MaxConcurrentReconciles:             opts.NodePoolMaxConcurrentReconciles,
+		SecretJanitorMaxConcurrentReconciles: opts.SecretJanitorMaxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller: %w", err)
 	}

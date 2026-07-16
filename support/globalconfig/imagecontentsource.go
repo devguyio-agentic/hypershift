@@ -222,8 +222,10 @@ type CommonRegistryProvider struct {
 	ReleaseProvider  *releaseinfo.ProviderWithOpenShiftImageRegistryOverridesDecorator
 }
 
-// NewCommonRegistryProvider creates a CommonRegistryProvider
-func NewCommonRegistryProvider(ctx context.Context, capChecker capabilities.CapabiltyChecker, client crclient.Client, registryOverrides map[string]string) (CommonRegistryProvider, error) {
+// NewCommonRegistryProvider creates a CommonRegistryProvider.
+// enableLookupCache enables result caching in the release image provider to reduce
+// per-reconcile mirror probe round-trips (see --enable-release-image-lookup-cache).
+func NewCommonRegistryProvider(ctx context.Context, capChecker capabilities.CapabiltyChecker, client crclient.Client, registryOverrides map[string]string, enableLookupCache bool) (CommonRegistryProvider, error) {
 
 	var (
 		imageRegistryMirrors map[string][]string
@@ -246,6 +248,7 @@ func NewCommonRegistryProvider(ctx context.Context, capChecker capabilities.Capa
 			RegistryOverrides: registryOverrides,
 		},
 		OpenShiftImageRegistryOverrides: imageRegistryMirrors,
+		ResultCacheEnabled:              enableLookupCache,
 	}
 
 	metadataProvider := &hyperutil.RegistryClientImageMetadataProvider{

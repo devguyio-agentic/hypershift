@@ -332,7 +332,7 @@ func TestReconcileMgmtImageRegistryOverrides(t *testing.T) {
 			}
 			client := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(objs...).Build()
 
-			provider, err := NewCommonRegistryProvider(ctx, tc.capChecker, client, tc.registryOverrides)
+			provider, err := NewCommonRegistryProvider(ctx, tc.capChecker, client, tc.registryOverrides, false)
 
 			// Check error
 			if tc.expectedError != nil {

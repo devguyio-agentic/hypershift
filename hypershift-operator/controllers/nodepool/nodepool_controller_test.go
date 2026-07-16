@@ -3394,7 +3394,7 @@ func TestNodePoolReconciler_reconcile(t *testing.T) {
 
 				// Verify that conditions processed after ignitionEndpointAvailableCondition are NOT set
 				// These conditions come later in the signalConditions array and should not be evaluated
-				// due to early exit at nodepool_controller.go:308-310
+				// due to early exit in the signalConditions loop in reconcile()
 				laterConditions := []string{
 					hyperv1.NodePoolSupportedVersionSkewConditionType,
 					hyperv1.NodePoolValidMachineConfigConditionType,
