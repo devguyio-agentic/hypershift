@@ -72,15 +72,21 @@ $(GOLANGCI_LINT):$(TOOLS_DIR)/go.mod # Build golangci-lint from tools folder.
 	cd $(TOOLS_DIR); GO111MODULE=on GOFLAGS=-mod=vendor GOWORK=off go build -tags=tools -o $(GOLANGCI_LINT) github.com/golangci/golangci-lint/cmd/golangci-lint
 	git checkout hack/tools/vendor/github.com/golangci/golangci-lint/cmd/golangci-lint/plugins.go
 
+.PHONY: api-lint
+api-lint: $(GOLANGCI_LINT)
+	cd api && $(GOLANGCI_LINT) run --config ./.golangci.yml -v --new-from-rev=${PULL_BASE_SHA}
+
+.PHONY: api-lint-fix
+api-lint-fix: $(GOLANGCI_LINT)
+	cd api && $(GOLANGCI_LINT) run --config ./.golangci.yml --fix -v --new-from-rev=${PULL_BASE_SHA}
+
 .PHONY: lint
-lint: $(GOLANGCI_LINT)
-	$(GOLANGCI_LINT) run --config ./.golangci.yml -v
-	cd api && $(GOLANGCI_LINT) run --config ./.golangci.yml -v
+lint: generate api-lint
+	$(GOLANGCI_LINT) run --config ./.golangci.yml --modules-download-mode=readonly -v
 
 .PHONY: lint-fix
-lint-fix:
+lint-fix: generate api-lint-fix
 	$(GOLANGCI_LINT) run --config ./.golangci.yml --fix -v
-	cd api && $(GOLANGCI_LINT) run --config ./.golangci.yml --fix -v
 
 .PHONY: verify
 verify: generate update staticcheck fmt vet verify-codespell lint cpo-container-sync run-gitlint
