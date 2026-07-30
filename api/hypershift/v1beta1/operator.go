@@ -284,3 +284,51 @@ type IngressOperatorSpec struct {
 	// +kubebuilder:validation:Type=object
 	EndpointPublishingStrategy *operatorv1.EndpointPublishingStrategy `json:"endpointPublishingStrategy,omitempty"`
 }
+
+// CSIDriverOperatorConfig specifies configuration for the CSI driver operator
+// in the hosted cluster. Platform-specific configuration is nested inside
+// the operator's config, following the ingress operator pattern where
+// platform branching is inside the operator's own struct.
+// Once the aws field is set, it cannot be removed.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.aws) || has(self.aws)",message="aws is immutable once set and cannot be removed"
+// +kubebuilder:validation:MinProperties=1
+type CSIDriverOperatorConfig struct {
+	// aws specifies configuration for the AWS EBS CSI driver operator.
+	// Once set, this field cannot be removed.
+	// +optional
+	AWS AWSCSIDriverConfig `json:"aws,omitzero,omitempty"`
+}
+
+// AWSCSIDriverConfig specifies configuration for the AWS EBS CSI driver.
+// Once kmsKeyARN is set, it cannot be removed from this struct.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.kmsKeyARN) || has(self.kmsKeyARN)",message="kmsKeyARN cannot be removed once set"
+// +kubebuilder:validation:MinProperties=1
+type AWSCSIDriverConfig struct {
+	// kmsKeyARN is the ARN of an AWS KMS key used to encrypt volumes
+	// created by the default StorageClass. When set, new PersistentVolumes
+	// provisioned by the default StorageClass are encrypted with this key
+	// instead of the AWS account's default EBS encryption key.
+	//
+	// When omitted, no KMS encryption is configured on the default StorageClass.
+	// EBS volumes use the AWS account's default encryption settings.
+	//
+	// The value may be either the ARN or Alias ARN of a KMS key in the format:
+	//   arn:<partition>:kms:<region>:<account-id>:(key|alias)/<resource-id>
+	//
+	// When set, must be between 1 and 2048 characters.
+	//
+	// This field is applied at cluster creation time only and is immutable
+	// once set. Day-2 changes to storage encryption should be made directly
+	// on the ClusterCSIDriver resource in the guest cluster.
+	//
+	// The StorageARN role in AWSRolesRef must have kms:Decrypt,
+	// kms:GenerateDataKeyWithoutPlaintext, and kms:CreateGrant
+	// permissions on the specified key.
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:XValidation:rule="matches(self, '^arn:(aws|aws-cn|aws-us-gov|aws-iso|aws-iso-b|aws-iso-e|aws-iso-f):kms:[a-z0-9-]+:[0-9]{12}:(key|alias)/.+$')",message="kmsKeyARN must be a valid AWS KMS key ARN in the format: arn:<partition>:kms:<region>:<account-id>:(key|alias)/<key-id-or-alias>"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="kmsKeyARN is immutable"
+	KMSKeyARN string `json:"kmsKeyARN,omitempty"`
+}

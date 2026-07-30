@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	configoperatorv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/configoperator"
 	oapiv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/oapi"
 	"github.com/openshift/hypershift/support/azureutil"
 	component "github.com/openshift/hypershift/support/controlplane-component"
@@ -40,7 +41,13 @@ func (r *clusterStorageOperator) NeedsManagementKASAccess() bool {
 	return true
 }
 
-func NewComponent() component.ControlPlaneComponent {
+func NewComponent(hcp *hyperv1.HostedControlPlane) component.ControlPlaneComponent {
+	deps := []string{oapiv2.ComponentName}
+	if hcp.Spec.OperatorConfiguration != nil &&
+		hcp.Spec.OperatorConfiguration.CSIDriverConfig.AWS.KMSKeyARN != "" {
+		deps = append(deps, configoperatorv2.ComponentName)
+	}
+
 	return component.NewDeploymentComponent(ComponentName, &clusterStorageOperator{}).
 		WithAdaptFunction(adaptDeployment).
 		WithPredicate(isStorageAndCSIManaged).
@@ -68,7 +75,7 @@ func NewComponent() component.ControlPlaneComponent {
 			"controller-config.yaml",
 			component.WithAdaptFunction(component.NewGenericControllerConfigAdapter("0.0.0.0:8443", "")),
 		).
-		WithDependencies(oapiv2.ComponentName).
+		WithDependencies(deps...).
 		InjectAvailabilityProberContainer(podspec.AvailabilityProberOpts{
 			KubeconfigVolumeName: "guest-kubeconfig",
 			RequiredAPIs: []schema.GroupVersionKind{
