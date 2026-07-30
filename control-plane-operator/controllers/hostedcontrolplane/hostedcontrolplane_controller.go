@@ -274,7 +274,7 @@ func (r *HostedControlPlaneReconciler) registerComponents(hcp *hyperv1.HostedCon
 		powervsccmv2.NewComponent(),
 		gcpccmv2.NewComponent(),
 		ccov2.NewComponent(),
-		storagev2.NewComponent(),
+		storagev2.NewComponent(hcp),
 		kubevirtcsiv2.NewComponent(),
 		cnov2.NewComponent(),
 		ntov2.NewComponent(),
