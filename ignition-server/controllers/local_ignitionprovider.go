@@ -558,13 +558,22 @@ func (p *LocalIgnitionProvider) copyMCOOutputToMCC(destDir, mccDir, configDir st
 	return nil
 }
 
+func copyMCCConfigInputs(configDir, mccDir string) error {
+	if err := copyFile(filepath.Join(configDir, "cluster-apiserver-config.yaml"), filepath.Join(mccDir, "cluster-apiserver-config.yaml")); err != nil {
+		return fmt.Errorf("failed to copy cluster-apiserver-config.yaml: %w", err)
+	}
+	if err := copyFile(filepath.Join(configDir, "image-config.yaml"), filepath.Join(mccDir, "image-config.yaml")); err != nil {
+		return fmt.Errorf("failed to copy image-config.yaml: %w", err)
+	}
+	return nil
+}
+
 func (p *LocalIgnitionProvider) runMCC(ctx context.Context, dirs *payloadDirs, imageProvider *imageprovider.SimpleReleaseImageProvider, payloadVersion semver.Version) error {
 	log := ctrl.Log.WithName("get-payload")
 	start := time.Now()
 
-	// copy the image config out of the configDir and into the mccBaseDir
-	if err := copyFile(filepath.Join(dirs.configDir, "image-config.yaml"), filepath.Join(dirs.mccDir, "image-config.yaml")); err != nil {
-		return fmt.Errorf("failed to copy image-config.yaml: %w", err)
+	if err := copyMCCConfigInputs(dirs.configDir, dirs.mccDir); err != nil {
+		return err
 	}
 
 	// args contains the base args that have not changed over time.
@@ -859,8 +868,9 @@ func (r *LocalIgnitionProvider) reconcileValidReleaseInfoCondition(ctx context.C
 // writeOSImageStreamManifest writes a 99_osimagestream.yaml manifest to mccDir.
 // The MCC bootstrap reads this CR to discover available RHEL streams from OCI
 // labels and select the requested stream for OS image resolution.
+// Uses v1 API version per https://github.com/openshift/machine-config-operator/pull/6076
 func writeOSImageStreamManifest(mccDir, osStream string) error {
-	manifest := fmt.Sprintf(`apiVersion: machineconfiguration.openshift.io/v1alpha1
+	manifest := fmt.Sprintf(`apiVersion: machineconfiguration.openshift.io/v1
 kind: OSImageStream
 metadata:
   name: cluster

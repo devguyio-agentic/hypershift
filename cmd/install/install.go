@@ -149,6 +149,7 @@ type Options struct {
 	EnableSizeTagging                         bool
 	EnableEtcdRecovery                        bool
 	EnableCPOOverrides                        bool
+	EnableStandaloneKarpenterOperator         bool
 	AroHCPKeyVaultUsersClientID               string
 	TechPreviewNoUpgrade                      bool
 	RegistryOverrides                         string
@@ -165,6 +166,7 @@ type Options struct {
 	RenderSensitive                           bool
 	HCPEgressBlockCIDRs                       []string
 	InstallScope                              string
+	DisableCAPIMigration                      bool
 }
 
 func (o *Options) Complete() error {
@@ -445,6 +447,7 @@ func NewCommand() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&opts.EnableValidatingWebhook, "enable-validating-webhook", opts.EnableValidatingWebhook, "Enable webhook for validating hypershift API types")
 	cmd.PersistentFlags().BoolVar(&opts.EnableConversionWebhook, "enable-conversion-webhook", opts.EnableConversionWebhook, "Enable webhook for converting hypershift API types")
 	cmd.PersistentFlags().BoolVar(&opts.DisableCAPIConversionWebhook, "disable-capi-conversion-webhook", opts.DisableCAPIConversionWebhook, "Disable conversion webhook for CAPI CRDs during v1beta1/v1beta2 transition")
+	cmd.PersistentFlags().BoolVar(&opts.DisableCAPIMigration, "disable-capi-migration", opts.DisableCAPIMigration, "Placeholder flag for upcoming feature: Disable automatic CAPI CRD storage version migration from v1beta1 to v1beta2")
 	cmd.PersistentFlags().BoolVar(&opts.ExcludeEtcdManifests, "exclude-etcd", opts.ExcludeEtcdManifests, "Leave out etcd manifests")
 	cmd.PersistentFlags().Var(&opts.PlatformMonitoring, "platform-monitoring", "Select an option for enabling platform cluster monitoring. Valid values are: None, OperatorOnly, All")
 	cmd.PersistentFlags().BoolVar(&opts.EnableCIDebugOutput, "enable-ci-debug-output", opts.EnableCIDebugOutput, "If extra CI debug output should be enabled")
@@ -497,6 +500,7 @@ func NewCommand() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&opts.EnableSizeTagging, "enable-size-tagging", opts.EnableSizeTagging, "If true, HyperShift will tag the HostedCluster with a size label corresponding to the number of worker nodes")
 	cmd.PersistentFlags().BoolVar(&opts.EnableEtcdRecovery, "enable-etcd-recovery", opts.EnableEtcdRecovery, "If true, the HyperShift operator checks for failed etcd pods and attempts a recovery if possible")
 	cmd.PersistentFlags().BoolVar(&opts.EnableCPOOverrides, "enable-cpo-overrides", opts.EnableCPOOverrides, "If true, the HyperShift operator uses a set of static overrides for the CPO image given specific release versions")
+	cmd.PersistentFlags().BoolVar(&opts.EnableStandaloneKarpenterOperator, "enable-standalone-karpenter-operator", opts.EnableStandaloneKarpenterOperator, "If true, the HyperShift operator deploys the standalone karpenter-operator binary instead of the karpenter-operator embedded in the HO image (default false)")
 	cmd.PersistentFlags().StringVar(&opts.AroHCPKeyVaultUsersClientID, "aro-hcp-key-vault-users-client-id", opts.AroHCPKeyVaultUsersClientID, "The client ID of the managed identity which can access the Azure Key Vaults, in an AKS management cluster, to retrieve secrets and certificates.")
 	// TODO: Would it make sense to deprecate this flag in favor of a new flag like `--feature-set=TechPreviewNoUpgrade`
 	// and make it so that setting this flag is essentially equivalent to that?
@@ -1381,6 +1385,7 @@ func setupOperatorResources(opts Options, userCABundleCM *corev1.ConfigMap, trus
 		EnableSizeTagging:                       opts.EnableSizeTagging,
 		EnableEtcdRecovery:                      opts.EnableEtcdRecovery,
 		EnableCPOOverrides:                      opts.EnableCPOOverrides,
+		EnableKarpenterOperator:                 opts.EnableStandaloneKarpenterOperator,
 		AdditionalOperatorEnvVars:               opts.AdditionalOperatorEnvVars,
 		AROHCPKeyVaultUsersClientID:             opts.AroHCPKeyVaultUsersClientID,
 		TechPreviewNoUpgrade:                    opts.TechPreviewNoUpgrade,

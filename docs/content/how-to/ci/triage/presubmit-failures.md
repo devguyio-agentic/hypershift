@@ -105,7 +105,7 @@ These checks only run when relevant files change:
 |------------|-------------|-----------------|
 | **Envtest OCP API Validation** | `api/`, `test/envtest/`, CRD test assets | `FAIL` with the test name — see `test/envtest/README.md` for details |
 | **Envtest Vanilla Kube API Validation** | Same as above | Same as above |
-| **Docs Build** | `docs/**` changes | MkDocs build errors — usually a broken link or YAML syntax error |
+| **Docs Build** | `docs/**` changes | Zensical build errors — usually a broken link or YAML syntax error |
 | **Validate CPO Overrides** | `hypershift-operator/controlplaneoperator-overrides/assets/overrides.yaml` changes | Validation error for the CPO overrides file |
 | **gocacheprog Tests** | `contrib/ci/gocacheprog/**` changes | `FAIL` with the test name |
 
@@ -302,4 +302,5 @@ Post in [#forum-ocp-hypershift](https://redhat.enterprise.slack.com/archives/C04
 - [Debugging CI Failures](../v2-testing/debugging.md) — Reading JUnit XML, Ginkgo output, and dump-guests artifacts
 - [V2 E2E Testing Overview](../v2-testing/index.md) — Architecture of the v2 test framework
 - [CI Pipeline Configuration](../v2-testing/ci-pipeline.md) — How presubmit jobs are configured
+- [Test Flow](../v2-testing/test-flow.md) — End-to-end CI sequence, process boundaries, and inter-process communication
 - [Daily CI Health](daily-health.md) — Monitoring periodic and presubmit job health

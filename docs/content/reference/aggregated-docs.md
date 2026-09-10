@@ -154,6 +154,10 @@ The best PRs to use as a template are the simpler single-capability additions li
 
 ## Source: docs/content/contribute/branch-process.md
 
+---
+title: OCP Branching Tasks
+---
+
 ## OCP Branching Tasks for the HyperShift Team
 These are a set of tasks we need to perform on every OCP branching. We need to:
 
@@ -286,10 +290,9 @@ title: Contribute documentation
 
 # Contributing documentation
 
-HyperShift's documentation is based on MkDocs with the
-Material theme and roughly follows the
-Diátaxis Framework for content organization and stylistic
-approach.
+HyperShift's documentation is based on Zensical and
+roughly follows the Diátaxis Framework for content
+organization and stylistic approach.
 
 The documentation site is built and published automatically to https://hypershift.pages.dev/.
 
@@ -299,12 +302,8 @@ All documentation lives in the `docs` directory of the Git repository.
 
 All content should be Markdown files placed in the `docs/content` directory.
 The MkDocs configuration file
-contains all the MkDocs and Material theme configuration, including the navigation
-structure for the site.
-
-The `quay.io/hypershift/mkdocs-material:latest` image (Dockerfile)
-is published to provide an easy and portable way to run `mkdocs` fully configured
-to preview the site equivalent to the published site.
+contains all the Zensical configuration, including the navigation structure for
+the site.
 
 !!! note
 
@@ -335,20 +334,19 @@ To start a live preview of the site which automatically rebuilds and refreshes i
 response to local content and configuration changes, run the following from the
 `docs` directory:
 
-```shell
-make serve-containerized
-```
+=== "Native"
 
-Visit the site at http://0.0.0.0:8000.
+    ```shell
+    uv run --frozen zensical serve
+    ```
 
-!!! note
+=== "Containerized"
 
-    The `serve-containerized` Make target runs the `quay.io/hypershift/mkdocs-material:latest`
-    image with the local container runtime. Running `mkdocs` natively is possible
-    but not supported.
+    ```shell
+    make serve-containerized
+    ```
 
-    If you need more control over the local preview server, consult the Makefile
-    as a guide to constructing your own local server command.
+Visit the site at http://127.0.0.1:8000.
 
 ## Generate the API reference
 
@@ -3650,7 +3648,6 @@ openshift-apiserver-67f9d9c5c7-c9bmv             2/2     Running   0          89
 openshift-controller-manager-5899fc8778-q89xh    1/1     Running   0          2m51s
 openshift-oauth-apiserver-569c78c4d-568v8        1/1     Running   0          2m52s
 packageserver-ddfffb8d7-wlz6l                    2/2     Running   0          2m50s
-redhat-marketplace-catalog-7dd77d896-jtxkd       1/1     Running   0          2m51s
 redhat-operators-catalog-d66b5c965-qwhn7         1/1     Running   0          2m51s
 ~~~
 
@@ -4828,6 +4825,10 @@ This implementation provides a secure, autonomous solution that allows HostedClu
 ---
 
 ## Source: docs/content/how-to/agent/other-sdn-providers.md
+
+---
+title: Other SDN providers
+---
 
 This document explains how to create a HostedCluster that runs an SDN provider different from OVNKubernetes. The document assumes that you already have the required infrastructure in place to create HostedClusters.
 
@@ -9454,6 +9455,10 @@ This implementation provides a secure, autonomous solution that allows HostedClu
 
 ## Source: docs/content/how-to/aws/other-sdn-providers.md
 
+---
+title: Other SDN providers
+---
+
 This document explains how to create a HostedCluster that runs an SDN provider different from OVNKubernetes. The document assumes that you already have the required infrastructure in place to create HostedClusters.
 
 !!! important
@@ -10356,7 +10361,7 @@ spec:
 
 ## Source: docs/content/how-to/azure/backup-and-restore-etcd-snapshot.md
 
-# Etcd Snapshot Backup for Self-Managed Azure
+# Etcd Snapshot Backup and Restore for Self-Managed Azure
 
 !!! warning "Tech Preview"
 
@@ -10620,10 +10625,166 @@ az storage account delete \
     --yes
 ```
 
+## Restoring from an Etcd Snapshot
+
+!!! important
+
+    Only same-management-cluster restore is validated for self-managed Azure. Cross-management-cluster restore is not currently supported due to the lack of end-to-end testing coverage for that scenario.
+
+Restore is driven by OADP. The HyperShift OADP plugin orchestrates the full restore lifecycle:
+
+1. OADP recreates the HostedCluster from the Velero backup
+2. The plugin reads the etcd snapshot URL from the backup annotations and injects it into the restored HostedCluster's `spec.etcd.managed.storage.restoreSnapshotURL` field
+3. When the restored control plane boots, the control-plane-operator detects the URL and injects an `etcd-init` init container into the etcd StatefulSet
+4. The init container downloads the snapshot and restores it using `etcdutl snapshot restore`
+5. Once the restore completes, the `EtcdSnapshotRestored` condition is set on the HostedControlPlane
+
+The `restoreSnapshotURL` field is immutable — once set at HostedCluster creation time, it cannot be changed. The OADP plugin handles SAS token generation and URL injection automatically; no manual intervention is needed.
+
+For the full restore architecture and OADP plugin behavior, see Restore Flow Architecture.
+
+### Prerequisites
+
+- OADP 1.5+ installed with the HyperShift plugin (see OADP Setup below)
+- A completed OADP backup created with `--use-etcd-snapshot` mode
+- The `HCPEtcdBackup` associated with the backup must have `BackupCompleted` condition `True`
+
+### Step 1: Clean Up the Existing HostedCluster
+
+Before restoring, remove the existing HostedCluster resources:
+
+```bash
+# Delete the HostedCluster and NodePools
+kubectl delete hostedcluster my-hosted-cluster -n clusters
+
+# Verify no PVCs remain in the HostedControlPlane namespace
+kubectl get pvc -n clusters-my-hosted-cluster
+```
+
+### Step 2: Restore with the CLI
+
+```bash
+hypershift create oadp-restore \
+    --hc-name my-hosted-cluster \
+    --hc-namespace clusters \
+    --from-backup <backup-name> \
+    --use-etcd-snapshot
+```
+
+The `--use-etcd-snapshot` flag sets `restorePVs: false` in the Velero Restore CR. The HyperShift OADP plugin reads the snapshot URL from the backup annotations and injects it into the restored HostedCluster's `restoreSnapshotURL` field automatically.
+
+### Step 3: Verify the Restore
+
+Monitor the restore process:
+
+```bash
+# Watch the Velero restore status
+watch "oc get restore -n openshift-adp -o jsonpath='{.items[-1].status}' | jq"
+
+# Watch etcd pods for the init container
+kubectl get pods -n <HCP_NAMESPACE> -l app=etcd -w
+
+# Check the EtcdSnapshotRestored condition on the HostedControlPlane
+kubectl get hostedcontrolplane -n <HCP_NAMESPACE> \
+    -o jsonpath='{.items[0].status.conditions[?(@.type=="EtcdSnapshotRestored")]}' | jq
+
+# Verify the hosted cluster API server becomes available
+kubectl get hostedcluster my-hosted-cluster -n clusters \
+    -o jsonpath='{.status.conditions[?(@.type=="Available")]}'
+```
+
+The restore is complete when:
+
+- The Velero Restore reaches `Completed` phase
+- The `etcd-init` init container exits successfully
+- The `EtcdSnapshotRestored` condition is `True` on the HostedControlPlane
+- The HostedCluster reaches `Available` status
+
+### Restore Troubleshooting
+
+| Symptom | Cause | Resolution |
+|---------|-------|------------|
+| `etcd-init` container shows XML error output | SAS token expired or invalid URL | Delete the HostedCluster and trigger a new OADP restore |
+| `etcd-init` container shows curl 404 | Wrong blob URL | Verify the `snapshotURL` from the HCPEtcdBackup status; ensure the storage account and container still exist |
+| `etcd-init` logs "not empty, not restoring snapshot" | Existing data in etcd PVC | Delete the PVC and let the restore recreate it |
+| Velero restore stuck | OADP plugin error | Check `oc logs -n openshift-adp -l deploy=velero -f` for details |
+
+## OADP Setup
+
+OADP (OpenShift API for Data Protection) with the HyperShift plugin is required for backup and restore operations on self-managed Azure. The `hypershift create oadp-*` CLI commands auto-detect the Azure platform and include the correct CAPI resources (`azureclusters`, `azuremachinetemplates`, `azuremachines`).
+
+### Prerequisites
+
+- OADP 1.5+ installed on the management cluster
+- DataProtectionApplication (DPA) configured with `hypershift` in `defaultPlugins`
+- Azure Blob Storage credentials configured for the BackupStorageLocation
+
+For DPA configuration details, see the Azure DPA tab in the OADP 1.5+ guide.
+
+### Creating a Backup with the CLI
+
+Two backup modes are available:
+
+```bash
+# Volume snapshot mode (default) — backs up etcd PVs via CSI snapshots
+hypershift create oadp-backup \
+    --hc-name my-hosted-cluster \
+    --hc-namespace clusters
+
+# Etcd snapshot mode (Tech Preview) — uses HCPEtcdBackup CRD instead of PV snapshots
+hypershift create oadp-backup \
+    --hc-name my-hosted-cluster \
+    --hc-namespace clusters \
+    --use-etcd-snapshot
+```
+
+The `--use-etcd-snapshot` mode creates an `HCPEtcdBackup` CR and excludes PV-related resources from the Velero backup. This mode requires the `HCPEtcdBackup` feature gate and Azure Blob Storage configured as described in the Setup section.
+
+### Scheduling Backups
+
+Set up recurring backups using the OADP Schedule CR:
+
+```bash
+hypershift create oadp-schedule \
+    --hc-name my-hosted-cluster \
+    --hc-namespace clusters \
+    --schedule "0 2 * * *" \
+    --ttl 168h \
+    --use-etcd-snapshot
+```
+
+### Verifying OADP Operations
+
+```bash
+# Watch backup status
+watch "oc get backup -n openshift-adp -o jsonpath='{.items[-1].status}' | jq"
+
+# Watch restore status
+watch "oc get restore -n openshift-adp -o jsonpath='{.items[-1].status}' | jq"
+
+# Follow Velero logs
+oc logs -n openshift-adp -l deploy=velero -f
+```
+
+## Known Limitations
+
+| Limitation | Details |
+|-----------|---------|
+| Same-cluster restore only | Cross-management-cluster restore is not currently supported due to the lack of end-to-end testing coverage for that scenario |
+| OADP required for restore | Restore is driven by OADP; there is no standalone manual restore path for self-managed Azure |
+| `restoreSnapshotURL` is immutable | Set by the OADP plugin at HostedCluster creation time; cannot be changed afterward |
+| No in-place restore | Etcd data cannot be restored onto an existing HostedCluster; OADP recreates it from the backup |
+| Worker node reprovisioning | After restore, Azure worker nodes are reprovisioned; node readoption is not supported |
+| Tech Preview | The `HCPEtcdBackup` feature gate is required; this feature is not for production use |
+| Single snapshot per restore | `restoreSnapshotURL` accepts at most 1 entry |
+
 ## See Also
 
 - Etcd Snapshot Backup Overview - Architecture and backup flow
+- Restore Flow Architecture - Detailed restore sequence and OADP plugin behavior
 - Managed Services Credentials - Credential auto-detection and formats
+- OADP 1.5+ Disaster Recovery - Full OADP DR procedure with Azure DPA configuration
+- Disaster Recovery CLI - CLI reference for `hypershift create oadp-*` commands
 - Self-Managed Azure Overview - Self-managed Azure architecture
 
 
@@ -14360,7 +14521,7 @@ When a pull request modifies files under `docs/`, GitHub Actions workflows autom
 
 The preview system uses two separate workflows for security, following the reusable workflow pattern described in GitHub Actions Workflows:
 
-1. **Docs Build** (`.github/workflows/docs-build.yaml`) — triggers on `pull_request` for changes under `docs/`. The caller delegates to `docs-build-reusable.yaml@main`, which checks out the PR code, builds with MkDocs in strict mode, and uploads the built site as an artifact. This workflow has no access to secrets.
+1. **Docs Build** (`.github/workflows/docs-build.yaml`) — triggers on `pull_request` for changes under `docs/`. The caller delegates to `docs-build-reusable.yaml@main`, which checks out the PR code, builds with Zensical in strict mode, and uploads the built site as an artifact. This workflow has no access to secrets.
 2. **Docs Deploy** (`.github/workflows/docs-deploy.yaml`) — triggers via `workflow_run` when the Docs Build workflow completes successfully. It downloads the built artifact and deploys to Cloudflare Pages. This workflow has access to the `docs-preview` environment secrets but never executes PR code.
 
 GitHub shows a **View deployment** link in the PR timeline via the `docs-preview` environment.
@@ -14384,8 +14545,7 @@ To preview documentation locally:
 
 ```bash
 cd docs
-pip install -r requirements.txt
-mkdocs serve
+uv run zensical serve
 ```
 
 Then open http://127.0.0.1:8000.
@@ -14449,7 +14609,7 @@ All workflows run on self-hosted ARC runners and target the `main` and `release-
 
 | Caller | Reusable | Purpose |
 |--------|----------|---------|
-| `docs-build.yaml` | `docs-build-reusable.yaml` | Build MkDocs site in strict mode |
+| `docs-build.yaml` | `docs-build-reusable.yaml` | Build Zensical site in strict mode |
 
 !!! info
     The `docs-deploy.yaml` workflow is not a reusable workflow pair — it triggers via `workflow_run` after the Docs Build completes to deploy the preview. See Documentation Preview for details.
@@ -15079,7 +15239,7 @@ These checks only run when relevant files change:
 |------------|-------------|-----------------|
 | **Envtest OCP API Validation** | `api/`, `test/envtest/`, CRD test assets | `FAIL` with the test name — see `test/envtest/README.md` for details |
 | **Envtest Vanilla Kube API Validation** | Same as above | Same as above |
-| **Docs Build** | `docs/**` changes | MkDocs build errors — usually a broken link or YAML syntax error |
+| **Docs Build** | `docs/**` changes | Zensical build errors — usually a broken link or YAML syntax error |
 | **Validate CPO Overrides** | `hypershift-operator/controlplaneoperator-overrides/assets/overrides.yaml` changes | Validation error for the CPO overrides file |
 | **gocacheprog Tests** | `contrib/ci/gocacheprog/**` changes | `FAIL` with the test name |
 
@@ -15276,6 +15436,7 @@ Post in #forum-ocp-hypershift and tag `@hypershift-engineering-ic` with:
 - Debugging CI Failures — Reading JUnit XML, Ginkgo output, and dump-guests artifacts
 - V2 E2E Testing Overview — Architecture of the v2 test framework
 - CI Pipeline Configuration — How presubmit jobs are configured
+- Test Flow — End-to-end CI sequence, process boundaries, and inter-process communication
 - Daily CI Health — Monitoring periodic and presubmit job health
 
 
@@ -15525,7 +15686,7 @@ The `pre` steps run before tests (setup), `test` steps run the actual tests, and
 
 ## The Four CI Binaries
 
-All v2 CI logic is implemented in Go binaries built from `test/e2e/v2/cmd/` and shipped in the `hypershift-tests` image at `/hypershift/bin/`.
+All v2 CI logic is implemented in Go binaries built from `test/e2e/v2/cmd/` and shipped in the `hypershift-tests` image at `/hypershift/bin/`. For how these binaries fit into the overall CI sequence — process boundaries, parallelism, and inter-process communication — see Test Flow.
 
 ### `create-guests`
 
@@ -15751,7 +15912,7 @@ After editing job config, regenerate with `make jobs WHAT=openshift/hypershift` 
 
 # Debugging CI Failures
 
-This guide explains how to diagnose failing v2 CI jobs by tracing test failures to their source clusters and reading diagnostic artifacts.
+This guide explains how to diagnose failing v2 CI jobs by tracing test failures to their source clusters and reading diagnostic artifacts. For background on the overall CI pipeline sequence and process boundaries, see Test Flow.
 
 ## Finding Test Results
 
@@ -15938,6 +16099,8 @@ flowchart TD
 4. **run-tests** invokes `bin/test-e2e-v2` once per `TestGroup` with a different `--ginkgo.label-filter` and `E2E_HOSTED_CLUSTER_NAME`. Whether groups run concurrently or sequentially is determined by placement in the `TestMatrix` struct — groups in `TestMatrix.Parallel` run concurrently, while groups in `TestMatrix.Sequential` run their steps one after another on the same cluster.
 5. **dump-guests** collects diagnostic artifacts in parallel. Always exits 0.
 6. **destroy-guests** tears down all clusters in parallel. Exits non-zero if any destroy fails.
+
+For the complete end-to-end sequence — including process boundaries, inter-process communication, and Ginkgo lifecycle details — see Test Flow.
 
 !!! info "Key insight"
     `run-tests` doesn't run tests itself — it invokes the same compiled `bin/test-e2e-v2` binary multiple times with different label filters and cluster targets.
@@ -16197,6 +16360,410 @@ Tests remain in v1 when:
 - **They require unique cluster configurations** - Tests that need custom NodePool settings, specific platform configurations, or particular release images for which no `ClusterSpec` variant has been defined yet in the platform's `PlatformConfig`.
 
 See `test/e2e/` for current v1 test locations. There is no exhaustive backlog of tests to migrate - tests are ported to v2 as platforms transition to the v2 framework and as test maintainers see value in the migration.
+
+
+---
+
+## Source: docs/content/how-to/ci/v2-testing/test-flow.md
+
+# E2E v2 Test Flow
+
+This document describes the end-to-end flow of the HyperShift v2 e2e test framework,
+from CI job trigger through test execution and teardown. It covers process boundaries,
+inter-process communication, and the sequencing of mutually exclusive tests.
+
+## Contents
+
+- Ginkgo Decorators, Hooks, and Labels for Test Isolation
+    - Decorators
+    - Hooks
+    - Labels
+    - How These Layers Compose
+- High-Level Flow
+- Inside a test-e2e-v2 Process (Ginkgo Lifecycle)
+- Process Boundary Summary
+- Sequencing of Mutually Exclusive Tests
+- Inter-Process Communication
+
+## Ginkgo Decorators, Hooks, and Labels for Test Isolation
+
+The v2 framework uses Ginkgo features at two levels to keep tests from interfering
+with each other: the [**`run-tests` orchestrator**][run-tests] isolates test groups
+into separate OS processes targeting different clusters, and **within each process**,
+Ginkgo decorators and hooks manage execution order, state mutation, cleanup, and
+reporting semantics.
+
+### Decorators
+
+| Decorator | Purpose | Used by |
+|-----------|---------|---------|
+| **`Ordered`** | Specs in the container run in declaration order. If one fails, subsequent specs in the same container are skipped. Prevents dependent steps from running against corrupted state. | [BackupRestore, EtcdSnapshot][backup-restore-test], [EtcdChaos][etcd-chaos-test], [AzurePrivateLink, AzureEndpointAccess][azure-test], [PKI operator TLS modification][pki-test], [AdmissionPolicies][security-test], [ImageRegistryCapability][image-registry-test], [ExternalOIDCKeycloakAuth][external-oidc-test] |
+| **`Serial`** | Specs never run concurrently with other specs, even if Ginkgo parallel mode were enabled. Applied alongside `Ordered` when a test mutates shared cluster state that could interfere with other specs. | [BackupRestore, EtcdSnapshot][backup-restore-test] (separate binary), [PKI operator TLS modification][pki-test] |
+
+`Ordered` is the primary tool for inter-test dependencies within a single feature
+(e.g., backup must complete before restore can start). `Serial` adds the guarantee
+that no other spec in the process runs at the same time, which matters for tests
+that mutate cluster-wide resources like HostedCluster configuration or etcd state.
+In practice, since `run-tests` does not pass `--procs` to Ginkgo, all specs within
+a process already run sequentially — but `Serial` makes the constraint explicit and
+future-proof.
+
+### Hooks
+
+| Hook | Scope | Purpose |
+|------|-------|---------|
+| **`BeforeSuite`** | Once per process | Initializes the global [`TestContext`][test-context] from env vars (cluster name, namespace, artifact dir, management client). Runs before any spec. See [`suite_test.go`][suite-test]. |
+| **`BeforeAll`** | Once per `Ordered` container | Initializes shared state for an ordered sequence (e.g., resolve `TestContext`, validate platform support, capture original config for later restoration). Runs once before the first spec in the container. |
+| **`AfterAll`** | Once per `Ordered` container | Tears down shared state created by `BeforeAll` (e.g., delete backup resources, restore original HostedCluster config). |
+| **`BeforeEach`** | Before every spec | Top-level: resolves `TestContext` and validates the hosted cluster resource exists on the management cluster. (`Ordered` containers use `BeforeAll` for the same purpose.) Nested (in `Context`/`When` blocks) or inline in specs: runs platform guards (`Skip()` if wrong platform) or other precondition checks. |
+| **`DeferCleanup`** | After each spec (LIFO) | Restores mutated state or deletes created resources. Registered immediately after mutation/creation so cleanup runs even if the test panics or fails before reaching manual deletion. |
+
+The `BeforeAll`/`AfterAll` pair is critical for lifecycle tests that share expensive
+preconditions across multiple ordered specs (e.g., backup-restore creates a backup
+once, then multiple specs verify different aspects of the restore). Without `Ordered`,
+`BeforeAll`/`AfterAll` cannot be used — Ginkgo enforces this at the framework level.
+
+### Labels
+
+| Label | Effect |
+|-------|--------|
+| **`lifecycle`** | Marks tests that mutate cluster state (upgrades, nodepool scaling, etcd chaos, global pull secret, OS image stream, autoscaling, platform-specific lifecycle). The simple [`hypershift-e2e-v2` CI chain][e2e-v2-chain] filters these out with `--ginkgo.label-filter='!lifecycle'` so that read-only compliance runs don't trigger mutations. The `run-tests` orchestrator runs lifecycle tests on dedicated clusters via specific label filters. |
+| **`Informing`** | The custom [`InformingAwareFailHandler`][fail-handler] converts failures on specs with this label into skips. The test appears as "skipped" in JUnit XML rather than "failed", so it doesn't block the CI job. Used for tests validating optional or in-progress features (e.g., metrics forwarding, custom labels/tolerations). |
+| **Feature/platform labels** (e.g., `self-managed-azure-public`, `nodepool-autoscaling`, `control-plane-upgrade`) | Control which specs run in which `test-e2e-v2` process. The [`run-tests` orchestrator][run-tests] passes `--ginkgo.label-filter` with non-overlapping label sets so each process only runs specs relevant to its assigned cluster variant. The label-to-cluster mapping is defined by [`TestMatrix`][azure-platform] in the platform config. |
+
+### How These Layers Compose
+
+```text
+run-tests orchestrator
+├── Process 1 (public cluster): --ginkgo.label-filter="self-managed-azure-public || nodepool-lifecycle || ..."
+│   ├── Describe "NodePool Lifecycle" [Ordered] ← specs run in order, share BeforeAll setup
+│   │   ├── BeforeAll: create test nodepool
+│   │   ├── It "should scale up" ← mutation test
+│   │   ├── It "should scale down"
+│   │   └── AfterAll: delete test nodepool
+│   ├── Describe "Control Plane Workloads" ← read-only, no Ordered needed
+│   │   ├── It "should have resource requests" ← stateless assertion
+│   │   └── Context "Custom labels" [Informing] ← failure → skip, non-blocking
+│   └── ...
+├── Process 2 (private cluster): --ginkgo.label-filter="self-managed-azure-private || ..."
+│   └── ...
+└── Sequential group (upgrade cluster):
+    ├── Process 6a: --ginkgo.label-filter="control-plane-upgrade" ← must finish before 6b
+    │   └── Describe "Control Plane Upgrade" ← triggers version rollout
+    └── Process 6b: --ginkgo.label-filter="etcd-chaos" ← only runs if 6a passed
+        └── Describe "Etcd Chaos" [Ordered] ← specs run in order, BeforeAll snapshots etcd
+```
+
+Cluster-level isolation (different processes target different clusters) prevents
+inter-group interference. Within a process, `Ordered`/`Serial` prevent inter-spec
+interference for mutation-heavy features. `DeferCleanup` ensures each spec restores
+what it touched. `Informing` decouples experimental coverage from gate status. The
+`lifecycle` label separates mutation tests from read-only compliance runs at the CI
+job level.
+
+## High-Level Flow
+
+The diagram below shows the general v2 e2e flow. The framework is
+platform-agnostic — each platform implements the [`PlatformConfig`][platform]
+interface — but Azure is currently the only implementation and serves as the
+reference. The concrete examples here follow the
+[`e2e-azure-v2-self-managed`][ci-job-config] CI job and its
+[workflow][workflow]. ci-operator builds the [`hypershift-tests`][dockerfile-e2e]
+image (via [`Dockerfile.e2e`][dockerfile-e2e], which invokes several
+[`Makefile`][makefile] targets), then chains together cluster creation, test
+execution, and teardown steps.
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    box Prow Cluster
+        participant Prow
+        participant CIO as ci-operator
+    end
+
+    box CI Pod (hypershift-tests image)
+        participant CG as create-guests
+        participant RT as run-tests
+        participant T as test-e2e-v2<br/>(subprocesses)
+        participant DG as destroy-guests
+    end
+
+    participant MC as Management Cluster<br/>(nested OCP)
+
+    Note over Prow,MC: Phase 1: CI Job Setup (openshift-release workflow)
+
+    Prow->>CIO: Trigger job (PR event / periodic)
+    CIO->>CIO: Build hypershift-tests image (Dockerfile.e2e)
+
+    Note over CIO: Key v2 binaries:<br/>test-e2e-v2, test-backuprestore, create-guests,<br/>run-tests, destroy-guests, dump-guests, hypershift
+
+    CIO->>CIO: Execute workflow pre steps
+
+    Note over CIO,MC: Pre steps (sequential):<br/>1. ipi-install-rbac<br/>2. hypershift-setup-nested-management-cluster<br/>3. hypershift-azure-setup-private-link<br/>4. hypershift-install (HyperShift operator)<br/>5. hypershift-resolve-nodepool-releases<br/>6. create-selfmanaged-guests (shown below)
+
+    Note over Prow,MC: Phase 2: Guest Cluster Creation (create-guests binary, pre step 6)
+
+    CIO->>CG: Run create-selfmanaged-guests step<br/>(KUBECONFIG=management_cluster_kubeconfig)
+
+    activate CG
+    Note over CG: Single Go process, phases run sequentially.<br/>Phases 1, 3, and 5 use internal goroutines for parallelism.
+
+    par Phase 1: Create 6 clusters in parallel (goroutines + exec.Command)
+        CG->>MC: Create public-{hash}
+        CG->>MC: Create private-{hash} (Private endpoint access)
+        CG->>MC: Create oauth-lb-{hash} (OAuth via LoadBalancer)
+        CG->>MC: Create upgrade-{hash} (N-1 release, HA control plane)
+        CG->>MC: Create autoscaling-{hash}
+        CG->>MC: Create external-oidc-{hash}
+    end
+    Note right of CG: Each calls `hypershift create cluster azure`<br/>with variant-specific flags.<br/>Hooks run between phases:<br/>PreCreate (deploy Keycloak),<br/>PostCreate (patch OperatorConfiguration),<br/>PostAvailable, PostVersionRollout (OIDC config).
+
+    CG->>MC: Watch all clusters for Available condition<br/>(controller-runtime Watch, 45m timeout)
+    MC-->>CG: All 6 clusters Available
+
+    CG->>MC: Watch for version rollout completion<br/>(VersionState=Completed on all history entries)
+    MC-->>CG: All 6 clusters rolled out
+
+    CG->>CG: Write cluster names and<br/>platform-specific config to SHARED_DIR
+    deactivate CG
+
+    Note over Prow,MC: Phase 3: Test Execution (run-tests binary)
+
+    CIO->>RT: Run run-e2e-v2-selfmanaged step<br/>(KUBECONFIG=management_cluster_kubeconfig)
+
+    activate RT
+    Note over RT: Reads HYPERSHIFT_PLATFORM → builds TestMatrix<br/>Reads cluster names and platform config from SHARED_DIR
+
+    RT->>RT: PlatformConfig.SetupTestEnv()<br/>(set env vars from SHARED_DIR files)
+
+    par Parallel test groups (each is a goroutine calling exec.Command)
+        RT->>T: public-{hash} (platform + feature tests)
+        RT->>T: private-{hash} (private topology + compliance)
+        RT->>T: oauth-lb-{hash} (OAuth, health, metrics, registry)
+        RT->>T: autoscaling-{hash}
+        RT->>T: external-oidc-{hash}
+    end
+    Note right of RT: Each subprocess receives cluster name via<br/>E2E_HOSTED_CLUSTER_NAME env var and label<br/>filter via --ginkgo.label-filter
+
+    par Sequential group: upgrade-and-chaos (single goroutine, steps run in order)
+        RT->>T: upgrade-{hash} (upgrade tests)
+        Note over T: Process 6a (upgrade)
+        T-->>RT: exit 0 (upgrade passed)
+
+        RT->>T: upgrade-{hash} (etcd-chaos, same cluster)
+        Note over T: Process 6b (etcd-chaos)
+        T-->>RT: exit 0 or error
+    end
+
+    T-->>RT: All parallel groups return exit codes
+    RT->>RT: Collect results, report pass/fail summary
+    RT-->>CIO: exit code (0 if all passed)
+    deactivate RT
+
+    Note over Prow,MC: Phase 4: Teardown (post steps, always run)
+
+    CIO->>CIO: Run dump-guests<br/>(collect artifacts from all clusters)
+
+    CIO->>DG: Run destroy-selfmanaged-guests step (best_effort: true)
+    activate DG
+    par Destroy all 6 clusters in parallel
+        DG->>MC: hypershift destroy cluster azure<br/>for each variant (--cluster-grace-period=40m)
+    end
+    DG-->>CIO: exit code
+    deactivate DG
+
+    CIO->>CIO: Destroy nested management cluster
+    CIO->>Prow: Report results (JUnit XML)
+```
+
+## Inside a test-e2e-v2 Process (Ginkgo Lifecycle)
+
+Each `test-e2e-v2` invocation is a single OS process running the Ginkgo v2 test
+framework. The process is a compiled Go test binary (`go test -c`) with the `e2ev2`
+build tag.
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    participant RT as run-tests<br/>(parent process)
+    participant G as test-e2e-v2<br/>(Ginkgo process)
+    participant MC as Management<br/>Cluster API
+    participant HCA as HostedCluster<br/>API (guest)
+
+    RT->>G: exec test-e2e-v2 with label filter,<br/>env: E2E_HOSTED_CLUSTER_NAME/NAMESPACE
+
+    activate G
+    Note over G: Go test framework calls TestE2EV2(t)<br/>which calls ginkgo.RunSpecs(t, "hypershift-e2e")
+
+    G->>G: BeforeSuite: SetupTestContextFromEnv()<br/>(management client, cluster identity, artifact dir)
+
+    Note over G: Ginkgo builds spec tree from all<br/>var _ = Describe(...) registrations
+
+    G->>G: Label filter prunes spec tree<br/>(only specs matching --ginkgo.label-filter run)
+
+    loop For each matching spec (It block)
+        G->>G: BeforeEach: get TestContext,<br/>platform guard (Skip if wrong platform)
+
+        alt First access to HostedCluster (sync.Once)
+            G->>MC: Get HostedCluster {name}/{namespace}
+            MC-->>G: HostedCluster object (cached for process lifetime)
+        end
+
+        alt First access to HostedCluster client (sync.Once)
+            G->>MC: Get kubeconfig Secret from HC status
+            MC-->>G: Secret with kubeconfig data
+            G->>G: Build REST config + controller-runtime client<br/>(cached for process lifetime)
+        end
+
+        G->>MC: Test assertions against management cluster
+        G->>HCA: Test assertions against hosted cluster
+
+        alt Test has "Informing" label and fails
+            G->>G: InformingAwareFailHandler converts<br/>Fail → Skip (test marked skipped, not failed)
+        else Test fails normally
+            G->>G: Standard Ginkgo Fail (spec marked failed)
+        end
+
+        G->>G: DeferCleanup runs (restore mutations)
+    end
+
+    G->>G: Write JUnit XML report to ARTIFACT_DIR
+    G-->>RT: exit code (0=all passed, 1=failures)
+    deactivate G
+```
+
+## Process Boundary Summary
+
+| Process | Binary | Lifecycle | Communication |
+|---------|--------|-----------|---------------|
+| **ci-operator** | CI infrastructure | Manages the entire [job][ci-job-config] | Runs [workflow steps][workflow] as pods |
+| **Step shell** | bash | One per CI step | Sets KUBECONFIG, runs Go binaries ([create][create-guests-sh], [run][run-tests-chain], [destroy][destroy-guests-chain]) |
+| **[create-guests][]** | `/hypershift/bin/create-guests` | Runs once in pre step | Forks `hypershift` CLI via `exec.Command`, writes cluster names and platform-specific config to `SHARED_DIR` |
+| **[run-tests][]** | `/hypershift/bin/run-tests` | Runs once in test step | Forks one `test-e2e-v2` process per test group via `exec.Command`. Env vars pass cluster name + config. Collects exit codes. |
+| **test-e2e-v2** | `/hypershift/bin/test-e2e-v2` | One process per test group (7 total, up to 6 concurrent) | Reads env vars for cluster identity. Talks to management + hosted cluster APIs via kubeconfig. Writes JUnit XML to `ARTIFACT_DIR`. Entry point: [`suite_test.go`][suite-test]. |
+| **[destroy-guests][]** | `/hypershift/bin/destroy-guests` | Runs once in post step | Forks `hypershift` CLI via `exec.Command` for each cluster (parallel goroutines). |
+
+## Sequencing of Mutually Exclusive Tests
+
+Mutual exclusion between test groups is achieved through **cluster isolation** and
+**sequential groups**, not through in-process locking:
+
+```mermaid
+flowchart TD
+    subgraph TestMatrix["TestMatrix (defined by PlatformConfig)"]
+        subgraph Parallel["Parallel Groups (all run concurrently)"]
+            P1["public cluster<br/>(platform + feature tests)"]
+            P2["private cluster<br/>(private topology + compliance)"]
+            P3["oauth-lb cluster<br/>(OAuth, health, metrics, registry)"]
+            P4["autoscaling cluster"]
+            P5["external-oidc cluster"]
+        end
+
+        subgraph Sequential["Sequential Group: upgrade-and-chaos"]
+            direction TB
+            S1["Step 1: upgrade tests<br/>label: control-plane-upgrade"]
+            S2["Step 2: etcd-chaos tests<br/>label: etcd-chaos"]
+            S1 -->|"pass → continue"| S2
+            S1 -.->|"fail → skip remaining"| SKIP["Steps skipped"]
+        end
+    end
+
+    RT["run-tests orchestrator"] --> Parallel
+    RT --> Sequential
+
+```
+
+**Key mechanisms:**
+
+1. **Cluster-per-group isolation**: Each parallel test group targets a **different
+   HostedCluster**. Tests within a group share one cluster but different groups never
+   touch the same cluster. This eliminates inter-group interference without locks.
+
+2. **Label-based partitioning**: Ginkgo's `--ginkgo.label-filter` ensures each
+   `test-e2e-v2` process only runs specs matching its assigned labels. The label
+   sets are [non-overlapping across groups][azure-platform], so the same spec never
+   runs in two processes.
+
+3. **Sequential groups for ordered dependencies**: The `upgrade-and-chaos`
+   [sequential group][azure-platform] runs upgrade first, then etcd-chaos on the
+   **same cluster**. The [`run-tests` orchestrator][run-tests] enforces ordering by
+   running steps sequentially within a single goroutine. If upgrade fails, etcd-chaos
+   is skipped (the goroutine returns early).
+
+4. **No in-process mutex**: Because each `test-e2e-v2` process targets exactly one
+   cluster and runs non-overlapping label sets, there is no need for mutexes or
+   other synchronization between test specs. Ginkgo runs specs within a single
+   process serially by default (no `--procs` flag is passed).
+
+## Inter-Process Communication
+
+```mermaid
+flowchart LR
+    subgraph "SHARED_DIR (filesystem)"
+        F1["cluster-name-{variant}<br/>(one per cluster)"]
+        F2["management_cluster_kubeconfig"]
+        F3["platform-specific config<br/>(OIDC bundles, subnet IDs, etc.)"]
+    end
+
+    CG["create-guests"] -->|"writes"| F1
+    CG -->|"writes"| F3
+
+    RT["run-tests"] -->|"reads"| F1
+    RT -->|"reads"| F3
+    RT -->|"env vars"| TB["test-e2e-v2<br/>(subprocess)"]
+    TB -->|"JUnit XML"| AD["ARTIFACT_DIR"]
+
+    DG["destroy-guests"] -->|"derives names from<br/>PROW_JOB_ID + sha256"| MC["Management Cluster"]
+
+```
+
+- **SHARED_DIR**: Filesystem directory shared across all CI steps within a job.
+  [`create-guests`][create-guests] writes cluster names and platform-specific
+  config; [`run-tests`][run-tests] reads them. This is the primary IPC mechanism
+  between CI steps.
+- **Environment variables**: `run-tests` passes cluster identity to each `test-e2e-v2`
+  subprocess via `E2E_HOSTED_CLUSTER_NAME` and `E2E_HOSTED_CLUSTER_NAMESPACE` env vars.
+- **PROW_JOB_ID + SHA256**: [`destroy-guests`][destroy-guests] does not read
+  SHARED_DIR cluster names. Instead, it re-derives cluster names deterministically
+  from `PROW_JOB_ID` using the same [`DeriveClusterName()`][platform] function as
+  `create-guests`. This makes teardown idempotent and independent of whether creation
+  succeeded.
+- **KUBECONFIG**: All processes authenticate to the management cluster via the
+  kubeconfig file at `${SHARED_DIR}/management_cluster_kubeconfig`, set up by the
+  nested management cluster provisioning step.
+- **Exit codes**: `run-tests` collects exit codes from all `test-e2e-v2` subprocesses
+  and exits non-zero if any group failed.
+- **JUnit XML**: Each `test-e2e-v2` process writes a separate JUnit report to
+  `ARTIFACT_DIR`. ci-operator collects these for Sippy/Prow reporting.
+
+<!-- HyperShift repo links (openshift/hypershift, main branch) -->
+[run-tests]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/cmd/run-tests/main.go
+[create-guests]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/cmd/create-guests/main.go
+[destroy-guests]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/cmd/destroy-guests/main.go
+[suite-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/suite_test.go
+[test-context]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/internal/test_context.go
+[fail-handler]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/internal/fail_handler.go
+[platform]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/lifecycle/platform.go
+[azure-platform]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/lifecycle/azure.go
+[backup-restore-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/backup_restore_test.go
+[etcd-chaos-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/etcd_chaos_test.go
+[azure-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/hosted_cluster_azure_test.go
+[pki-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/control_plane_pki_operator_test.go
+[security-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/hosted_cluster_security_test.go
+[image-registry-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/hosted_cluster_image_registry_test.go
+[external-oidc-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/hosted_cluster_external_oidc_test.go
+[dockerfile-e2e]: https://github.com/openshift/hypershift/blob/main/Dockerfile.e2e
+[makefile]: https://github.com/openshift/hypershift/blob/main/Makefile
+
+<!-- openshift/release repo links (main branch) -->
+[ci-job-config]: https://github.com/openshift/release/blob/main/ci-operator/config/openshift/hypershift/openshift-hypershift-main.yaml
+[workflow]: https://github.com/openshift/release/blob/main/ci-operator/step-registry/hypershift/azure/e2e/v2-self-managed/hypershift-azure-e2e-v2-self-managed-workflow.yaml
+[create-guests-sh]: https://github.com/openshift/release/blob/main/ci-operator/step-registry/hypershift/azure/create-selfmanaged-guests/hypershift-azure-create-selfmanaged-guests-commands.sh
+[run-tests-chain]: https://github.com/openshift/release/blob/main/ci-operator/step-registry/hypershift/azure/run-e2e-v2-selfmanaged/hypershift-azure-run-e2e-v2-selfmanaged-chain.yaml
+[destroy-guests-chain]: https://github.com/openshift/release/blob/main/ci-operator/step-registry/hypershift/azure/destroy-selfmanaged-guests/hypershift-azure-destroy-selfmanaged-guests-chain.yaml
+[e2e-v2-chain]: https://github.com/openshift/release/blob/main/ci-operator/step-registry/hypershift/e2e-v2/hypershift-e2e-v2-chain.yaml
 
 
 ---
@@ -17403,6 +17970,135 @@ NodePool CPU architecture, the CLI will return an error and stop creating resour
 
 ---
 
+## Source: docs/content/how-to/configure-ocp-components/configurable-log-levels.md
+
+---
+title: Configurable Log Levels for Control Plane Components (Tech Preview)
+---
+
+!!! warning "Tech Preview"
+
+    Configurable log levels for control plane components is a Tech Preview feature. It requires the `HCPUserFacingOperatorLogs` feature gate to be enabled via the `TechPreviewNoUpgrade` feature set on the HyperShift Operator. Tech Preview features are not supported in production environments.
+
+## Overview
+
+HyperShift supports configuring log verbosity for hosted control plane components via the `spec.operatorConfiguration` field on the HostedCluster CR. This provides a supported, declarative API for tuning control plane log verbosity — replacing ad-hoc pod-level changes with a standard field on the HostedCluster resource managed by the service provider on the management cluster.
+
+## Prerequisites
+
+1. **Feature gate enabled**: The HyperShift Operator must be installed with the `TechPreviewNoUpgrade` feature set:
+
+    ```bash
+    hypershift install --tech-preview-no-upgrade
+    ```
+
+2. **Existing HostedCluster**: A running HostedCluster to configure.
+
+## Supported Components
+
+| Component                    | JSON Field                 | Logging Framework | Mechanism                |
+|------------------------------|----------------------------|-------------------|--------------------------|
+| kube-apiserver               | `kubeAPIServer`            | klog              | `--v=N` container arg    |
+| kube-controller-manager      | `kubeControllerManager`    | klog              | `--v=N` container arg    |
+| kube-scheduler               | `kubeScheduler`            | klog              | `--v=N` container arg    |
+| etcd                         | `etcd`                     | zap               | `ETCD_LOG_LEVEL` env var |
+| openshift-apiserver          | `openShiftAPIServer`       | klog              | `--v=N` container arg    |
+| openshift-controller-manager | `openShiftControllerManager` | klog            | `--v=N` container arg    |
+| openshift-oauth-apiserver    | `openShiftOAuthAPIServer`  | klog              | `--v=N` container arg    |
+| oauth-server                 | `oauthServer`              | klog              | `--v=N` container arg    |
+
+## Log Levels
+
+| LogLevel   | klog `--v` | etcd level | Use Case                                     |
+|------------|------------|------------|----------------------------------------------|
+| Normal     | 2          | info       | Production — standard verbosity              |
+| Debug      | 4          | debug      | Troubleshooting                              |
+| Trace      | 6          | debug      | Deep investigation                           |
+| TraceAll   | 8          | debug      | Full request/response dumps                  |
+
+When no `logLevel` is configured for a component, the Control Plane Operator does not inject any verbosity flag. The component runs with its built-in default (klog default 0 for most components).
+
+!!! warning
+    `TraceAll` (klog level 8) can log sensitive data including request bodies, tokens, and secrets. Use only in controlled environments and reset promptly after troubleshooting.
+
+## Setting Log Levels
+
+To increase log verbosity for a specific component, patch the HostedCluster on the management cluster:
+
+```bash
+oc patch hostedcluster my-cluster -n clusters --type=merge -p '{"spec":{"operatorConfiguration":{"kubeAPIServer":{"logLevel":"Debug"}}}}'
+```
+
+Multiple components can be configured in a single patch:
+
+```bash
+oc patch hostedcluster my-cluster -n clusters --type=merge -p '{"spec":{"operatorConfiguration":{"kubeAPIServer":{"logLevel":"Debug"},"openShiftControllerManager":{"logLevel":"Trace"}}}}'
+```
+
+Setting the `logLevel` field triggers a rolling restart of the affected component. When `controllerAvailabilityPolicy` is set to `HighlyAvailable` (the default), HA guarantees ensure zero downtime:
+
+- Load-balanced components (kube-apiserver, openshift-apiserver, openshift-oauth-apiserver, oauth-server) run 3 replicas — 2 continue serving while 1 restarts.
+- Leader-elected components (kube-controller-manager, kube-scheduler, openshift-controller-manager) run 2 replicas — the standby takes over during restart.
+- Etcd runs 3 replicas — Raft quorum is maintained during rolling update.
+
+With `SingleReplica` availability policy, expect brief disruption during the restart.
+
+## Checking Current Configuration
+
+```bash
+oc get hostedcluster my-cluster -n clusters -o jsonpath='{.spec.operatorConfiguration}' | jq .
+```
+
+## Resetting Log Levels
+
+Remove a specific component's log level override using a JSON patch:
+
+```bash
+oc patch hostedcluster my-cluster -n clusters --type=json -p '[{"op":"remove","path":"/spec/operatorConfiguration/kubeAPIServer"}]'
+```
+
+Removing the field causes the Control Plane Operator to stop injecting the component-specific log-level setting on the next reconciliation, restoring the component's built-in default.
+
+!!! note
+    For kube-apiserver specifically, the built-in default is restored only when neither the `operatorConfiguration` API field nor the deprecated KAS annotation (see below) is present. If the annotation is still set, it continues to control verbosity even after removing the API field.
+
+## KAS Annotation Deprecation
+
+The existing `hypershift.openshift.io/kube-apiserver-verbosity-level` annotation on the HostedCluster is deprecated. Use `spec.operatorConfiguration.kubeAPIServer.logLevel` instead.
+
+During the transition period, both are honored. When both are set, the `operatorConfiguration` API field takes precedence. When only the annotation is present, a deprecation warning condition is surfaced on the HostedCluster. To fully reset kube-apiserver verbosity to its built-in default, remove both the API field and the annotation.
+
+## API Reference
+
+```yaml
+apiVersion: hypershift.openshift.io/v1beta1
+kind: HostedCluster
+metadata:
+  name: my-cluster
+  namespace: clusters
+spec:
+  operatorConfiguration:
+    kubeAPIServer:
+      logLevel: Debug            # Normal | Debug | Trace | TraceAll
+    kubeControllerManager:
+      logLevel: Normal
+    kubeScheduler:
+      logLevel: Normal
+    etcd:
+      logLevel: Normal
+    openShiftAPIServer:
+      logLevel: Normal
+    openShiftControllerManager:
+      logLevel: Normal
+    openShiftOAuthAPIServer:
+      logLevel: Normal
+    oauthServer:
+      logLevel: Normal
+```
+
+
+---
+
 ## Source: docs/content/how-to/configure-ocp-components/custom-kas-kubeconfig.md
 
 # Custom Kube API Server DNS Configuration
@@ -17505,7 +18201,7 @@ The configuration resources that should be specified in the HostedCluster are:
 
 * APIServer - Provides API server configuration such as certificates and certificate authorities.
 * Authentication - Controls the identity provider and authentication configuration for the cluster.
-* FeatureGate - Enables FeatureGates so that you can use Tech Preview features.
+* FeatureGate - Enables FeatureGates so that you can use Tech Preview features. See Feature Gates for the distinction between management cluster and hosted cluster feature gates.
 * Ingress - Configuration details related to routing such as the default domain for routes.
 * Image - Configures how specific image registries should be treated (allowed, disallowed, insecure, CA details).
 * OAuth - Configures identity providers and other behavior related to internal OAuth server flows.
@@ -17930,6 +18626,7 @@ After installation, create a DataProtectionApplication (DPA) object, which defin
 This guide focuses on the following platforms:
 
 - AWS
+- Azure
 - Baremetal
 - Openstack
 - KubeVirt
@@ -17950,6 +18647,26 @@ oc create secret generic cloud-credentials -n openshift-adp --from-file cloud=cr
 !!! note
 
     If using AWS S3, additional AWS resources must be created to enable data backup and restoration. Follow these instructions to set up the necessary configurations.
+
+For Azure Blob Storage, create the credentials in the following format:
+
+```bash
+cat << EOF > ./credentials-azure
+[default]
+AZURE_SUBSCRIPTION_ID=<subscription-id>
+AZURE_TENANT_ID=<tenant-id>
+AZURE_CLIENT_ID=<client-id>
+AZURE_CLIENT_SECRET=<client-secret>
+AZURE_RESOURCE_GROUP=<resource-group>
+AZURE_CLOUD_NAME=AzurePublicCloud
+EOF
+
+oc create secret generic cloud-credentials -n openshift-adp --from-file cloud=credentials-azure
+```
+
+!!! note
+
+    For Azure, additional resources (Storage Account, Blob Container) must be created. Follow the Azure OADP installation guide or the self-managed Azure etcd backup setup for details.
 
 
 ### Sample DPA Configurations
@@ -18093,6 +18810,43 @@ Below are some samples of DPA configurations for the mentioned platforms
           defaultPlugins:
             - openshift
             - aws
+            - csi
+            - hypershift
+          resourceTimeout: 2h
+    ```
+
+=== "**Azure**"
+
+    ```yaml
+    ---
+    apiVersion: oadp.openshift.io/v1alpha1
+    kind: DataProtectionApplication
+    metadata:
+      name: dpa-instance
+      namespace: openshift-adp
+    spec:
+      backupLocations:
+        - name: default
+          velero:
+            provider: azure
+            default: true
+            objectStorage:
+              bucket: <blob_container_name>
+              prefix: hcp
+            config:
+              resourceGroup: <resource_group>
+              storageAccount: <storage_account_name>
+            credential:
+              key: cloud
+              name: cloud-credentials
+      configuration:
+        nodeAgent:
+          enable: true
+          uploaderType: kopia
+        velero:
+          defaultPlugins:
+            - openshift
+            - azure
             - csi
             - hypershift
           resourceTimeout: 2h
@@ -18608,6 +19362,115 @@ Once you create any of these DPA objects, several pods will be instantiated in t
 
     The backup process is considered complete when the `status.phase` is `Completed`.
 
+=== "**Azure**"
+
+    ### Data Plane workloads backup
+
+    !!! Note
+
+        If the workloads in the Data Plane are not crucial for you, it's safe to skip this step.
+
+    If you need to backup the applications running under the HostedCluster, it's advisable to follow the official documentation for backup and restore of OpenShift applications
+
+    The steps are the following:
+
+    - Deploy the OADP operator from OLM.
+      - Create the DPA (Data Protection Application), with a manifest similar to the one provided earlier. It might be beneficial to adjust the `Prefix` or/and `Bucket` fields to keep the ControlPlane and DataPlane backups separated.
+      - Create the backup manifest. This step varies depending on the complexity of the workloads in the Data Plane. It's essential to thoroughly examine how to back up the PersistentVolumes, the backend used, and ensure compatibility with our storage provisioner.
+
+      We recommend checking if your workloads contain Persistent Volumes and if our StorageClass is compatible with CSI Volume Snapshots, which is one of the simplest ways to handle this aspect.
+
+    As a standard approach to maintain consistency in the backup layer for the Hosted Control Plane, we will utilize `Kopia` as the backend tool for data snapshots, along with `File System Backup`. However, it's possible that your workloads may benefit from a different approach that better aligns with your specific use case.
+
+    !!! Important
+
+        The backup of the workloads residing in the Data Plane falls outside the scope of this documentation. Please refer to the official Openshift-ADP backup documentation for further details. Additional links and information can be found in the References section.
+
+    Once we have completed the backup of the Data Plane layer, we can proceed with the backup of the Hosted Control Plane (HCP).
+
+
+    ### Control Plane backup
+
+    Now, we will apply the backup manifest. Here is how it looks like:
+
+    ```yaml
+    ---
+    apiVersion: velero.io/v1
+    kind: Backup
+    metadata:
+      name: hc-clusters-hosted-backup
+      namespace: openshift-adp
+      labels:
+        velero.io/storage-location: default
+        spec:
+      hooks: {}
+      includedNamespaces:
+      - clusters
+      - clusters-hosted
+      includedResources:
+      - sa
+      - role
+      - rolebinding
+      - pod
+      - pvc
+      - pv
+      - configmap
+      - priorityclasses
+      - pdb
+      - hostedcluster
+      - nodepool
+      - secrets
+      - services
+      - deployments
+      - statefulsets
+      - hostedcontrolplane
+      - cluster
+      - azureclusters
+      - azuremachinetemplates
+      - azuremachines
+      - machinedeployment
+      - machineset
+      - machine
+      - route
+      - clusterdeployment
+      excludedResources: []
+      storageLocation: default
+      ttl: 2h30m0s
+      snapshotMoveData: true
+      datamover: "velero"
+      defaultVolumesToFsBackup: false
+      snapshotVolumes: true
+    ```
+
+    We will emphasize the most important fields:
+
+    - These two fields enable the CSI VolumeSnapshots to be automatically uploaded to the remote cloud storage.
+
+    ```yaml
+    snapshotMoveData: true
+    datamover: "velero"
+    ```
+
+    - This field selects the namespaces from which objects will be backed up. They should include namespaces from both the HostedCluster (in the example `clusters`) and the HostedControlPlane (in the example `clusters-hosted`).
+
+    ```yaml
+    includedNamespaces:
+    - clusters
+    - clusters-hosted
+    ```
+
+    - The Azure-specific CAPI resources that must be included:
+
+    ```yaml
+    - azureclusters
+    - azuremachinetemplates
+    - azuremachines
+    ```
+
+    Once you apply the manifest, you can monitor the backup process in two places: the backup object status and the Velero logs. Please refer to the Watching section for more information.
+
+    The backup process is considered complete when the `status.phase` is `Completed`.
+
 
 ## Restore
 
@@ -18691,6 +19554,12 @@ The restoration process is considered complete once the `status.phase` is `Compl
 
     - Restoration in a separated Management cluster is not supported by this provider
     - Node readoption is not supported in this provider yet, so the worker nodes will be reprovisioned at restoration time
+
+=== "**Azure**"
+
+    - Restoration on the same management cluster only (cross-cluster restore is not currently supported due to the lack of end-to-end testing coverage for that scenario)
+    - Node readoption is not supported in this provider yet, so the worker nodes will be reprovisioned at restoration time
+    - For etcd snapshot backup and restore details specific to self-managed Azure, see Etcd Snapshot Backup and Restore for Self-Managed Azure
 
 
 ## Schedule
@@ -22538,6 +23407,10 @@ After applying this change, the worker nodes will be able to consume the mirror 
 
 ## Source: docs/content/how-to/disconnected/idms-icsp-for-management-clusters.md
 
+---
+title: IDMS/ICSP Config for Management Cluster
+---
+
 ## Configuring disconnected HostedControlPlanes deployments
 
 !!! Note
@@ -22678,9 +23551,9 @@ This because there is not an easy way to validate them in advance for imagestrea
 In case the OLM catalogs got properly mirrored to an internal registry (using the original name and tag), the guest cluster owner can use the `hypershift.openshift.io/olm-catalogs-is-registry-overrides` annotation on the HostedCluster CR.
 The format is: `"sr1=dr1,sr2=dr2"` having the source registry string as a key and the destination registry string as value.
 OLM catalog image addresses, before being applied to the imagestream, are scanned for the source registry string and if found the string is replaced with the destination registry one.
-The cluster admin will also be able to bypass the whole OLM catalogs imagestream mechanism using 4 annotations (`hypershift.openshift.io/certified-operators-catalog-image`, `hypershift.openshift.io/community-operators-catalog-image`, `hypershift.openshift.io/redhat-marketplace-catalog-image`, `hypershift.openshift.io/redhat-operators-catalog-image`) on the HostedCluster CR to directly specify the address (only by digest) of the 4 images to be used for OLM operator catalogs.
+The cluster admin will also be able to bypass the whole OLM catalogs imagestream mechanism using 3 annotations (`hypershift.openshift.io/certified-operators-catalog-image`, `hypershift.openshift.io/community-operators-catalog-image`, `hypershift.openshift.io/redhat-operators-catalog-image`) on the HostedCluster CR to directly specify the address (only by digest) of the 3 images to be used for OLM operator catalogs.
 In this case the imageStream is not going to be created, and it will be up to the guest cluster owner updating the value of the annotations when the internal mirror will get refreshed to pull in operator updates.
-Please notice that if this override mechanism is required, all the 4 values for the 4 default catalog sources are needed.
+Please notice that if this override mechanism is required, all the 3 values for the 3 default catalog sources are needed.
 
 ## References
 
@@ -23216,54 +24089,103 @@ It will install four priority classes in a management cluster with the following
 
 # Feature Gates
 
-Feature gates in OpenShift allows to ensure everything new works together and optimizes for rapid evaluation in CI to promote without ever releasing a public preview.
-There are no guarantees that your fleet continues to be operational long term after you enable a feature gate.
+## :material-information-outline: Overview
 
-In the HCP context, there are multiple non exclusive scenarios where features might need to be gated:
+HyperShift has two separate feature gate systems that serve different purposes. Understanding which system applies is essential for correctly enabling and testing features.
 
-1 - A feature that impacts HO install
-E.g. New CRDs are required for CPOv2 (control plane operator version 2)
+| System | Scope | Set by |
+|--------|-------|--------|
+| **Management cluster feature gates** | CRD schemas, HyperShift Operator, Control Plane Operator | `hypershift install --tech-preview-no-upgrade` |
+| **Hosted Cluster feature gates** | OCP release payload for a single tenant | `spec.configuration.featureGate.featureSet` on the HostedCluster |
 
-2 - A feature that impacts the whole cluster fleet / HO
-E.g. Introduce fleet wide shared ingress to be validated in targeted environments
+!!! warning
 
-3 - A feature that impacts individual clusters
-E.g. Introduce using CPOv2 for some HC to develop feedback
+    These two systems are independent. Enabling a management cluster feature gate does **not** enable OCP feature gates inside hosted clusters, and vice versa.
 
-4 - A feature that impacts API
-E.g. Introduce a new provider like Openstack
-E.g. Introduce a new field/feature like AWS tenancy
+## :material-server-network: Management Cluster Feature Gates
 
-5 - A feature specific for an OCP component
-Components honour existing standalone in-cluster OCP feature gate mechanisim
+Management cluster feature gates govern the HyperShift infrastructure running on the management cluster. There are no guarantees that your fleet continues to be operational long-term after you enable these feature gates.
 
-## Users
-All the feature gates are grouped in a single TechPreviewNoUpgrade feature set. Current implementation exposes this --tech-preview-no-upgrade flag in the CLI at install time
+These gates apply to the following scenarios:
 
-```
-hypershift install --help
-```
-Will show among other flags:
-```
---tech-preview-no-upgrade                        If true, the HyperShift operator runs with TechPreviewNoUpgrade features enabled
+- A feature that impacts HyperShift Operator install (e.g. new CRDs are required for CPOv2)
+- A feature that impacts the whole cluster fleet (e.g. fleet-wide shared ingress to be validated in targeted environments)
+- A feature that impacts individual clusters (e.g. introduce using CPOv2 for some HostedClusters)
+- A feature that impacts the HyperShift API (e.g. introduce a new provider like OpenStack, or a new field like AWS tenancy)
+
+All management cluster feature gates are grouped under a single `TechPreviewNoUpgrade` feature set. To enable them, pass `--tech-preview-no-upgrade` at install time:
+
+```bash
+hypershift install --tech-preview-no-upgrade
 ```
 
-In a follow up we'll consider to introduce support to also signal --tech-preview-no-upgrade at the HC level.
-Eventually support for at least 1, 2, 3 and 4 afromentioned scenarios will most likely converge into a single API.
+This flag determines which CRD variants are installed (Default vs TechPreviewNoUpgrade) and configures the `HYPERSHIFT_FEATURESET` environment variable that both the HyperShift Operator and Control Plane Operator read.
 
-## Devs
+### Adding a Management Cluster Feature Gate
 
-We rely on openshift/api tooling for generating CRDs with openshift markers. See this PR as an example of a adding a field behind a feature gate.
+We rely on openshift/api tooling for generating CRDs with openshift markers. See this PR as an example of adding an API field behind a feature gate.
 
-The currently ongoing implementation of feature gates for the controllers business logic relies on "k8s.io/component-base/featuregate". This enables devs to declare granular gates for their features.
-See this PR as an example.
+The controller business logic uses `k8s.io/component-base/featuregate`. This enables devs to declare granular gates for their features. See this PR as an example.
 
-### Promoting a feature gated API field and feature to sable
+## :material-cloud-outline: Hosted Cluster Feature Gates
 
-Generally speaking any new field should start by being feature gated.
+Hosted Cluster feature gates control the OCP release payload for a specific hosted cluster. OCP components in the hosted control plane honor the standard in-cluster OCP feature gate mechanism. This applies to:
+
+- A feature specific to an OCP component (e.g. TLSAdherence, DynamicResourceAllocation)
+
+To enable a feature set for a hosted cluster, set it in `spec.configuration.featureGate.featureSet`:
+
+```yaml
+apiVersion: hypershift.openshift.io/v1beta1
+kind: HostedCluster
+metadata:
+  name: example
+  namespace: clusters
+spec:
+  configuration:
+    featureGate:
+      featureSet: TechPreviewNoUpgrade
+```
+
+!!! warning
+
+    Enabling `TechPreviewNoUpgrade` is irreversible and prevents minor-version upgrades on the hosted cluster. Use this only on test clusters where future upgrades are not required.
+
+The `featuregate-generator` job in the hosted control plane namespace renders the OCP payload's feature gates into a `feature-gate` ConfigMap that OCP components consume.
+
+!!! note
+
+    If you are an OCP component team looking to test a feature gate like `TLSAdherence` or `DynamicResourceAllocation`, this is the mechanism you need — set the feature set on the HostedCluster, not on the management cluster.
+
+### Example: Enabling TLSAdherence
+
+The `TLSAdherence` feature gate is an OCP feature gate that is part of the `TechPreviewNoUpgrade` feature set. To enable it on a hosted cluster:
+
+1. Set `TechPreviewNoUpgrade` as the feature set on the HostedCluster:
+
+    ```yaml
+    spec:
+      configuration:
+        featureGate:
+          featureSet: TechPreviewNoUpgrade
+    ```
+
+2. Verify the feature gate was rendered by checking the ConfigMap in the hosted control plane namespace:
+
+    ```bash
+    oc get configmap feature-gate -n <hcp-namespace> -o yaml
+    ```
+
+    !!! tip
+
+        The hosted control plane namespace is typically `<clusters-namespace>-<hostedcluster-name>`.
+
+## Promoting a Feature Gated API Field
+
+Generally speaking any new field should start by being feature-gated.
 The minimum criteria for promotion is:
 
-- Provide clear context and analysis on the PR about how the field might impact the different GA products. This includes but it is not limited to ROSA, ARO, IBM Cloud and MCE (self hosted).
+- Provide clear context and analysis on the PR about how the field might impact the different GA products. This includes but is not limited to ROSA, ARO, IBM Cloud and MCE (self-hosted).
 
 - Document the field with the expected behaviour for day 1 and day 2 changes.
 
@@ -23273,7 +24195,8 @@ The minimum criteria for promotion is:
 
 - There is e2e test coverage for day 2 on update UX failure expectations via this e2e test
 
-In general we aim to adhere and converge with stand alone principles in openshift/api
+In general we aim to adhere and converge with stand-alone principles in openshift/api
+
 
 ---
 
@@ -27226,7 +28149,6 @@ openshift-apiserver-64b4669d54-ffpw2              2/2     Running    0          
 openshift-controller-manager-7847ddf4fb-x5659     1/1     Running    0               6m38s
 openshift-oauth-apiserver-554c449b8f-lk97w        1/1     Running    0               6m41s
 packageserver-6fd9f8479-pbvzl                     0/2     Init:0/1   0               6m22s
-redhat-marketplace-catalog-8cc88f5cb-hbxv9        1/1     Running    0               6m29s
 redhat-operators-catalog-b749d6945-2bx8k          1/1     Running    0               6m29s
 ~~~
 
@@ -30365,12 +31287,15 @@ The list of components restarted are listed below:
 * openshift-controller-manager
 * openshift-oauth-apiserver
 * packageserver
-* redhat-marketplace-catalog
 * redhat-operators-catalog
 
 ---
 
 ## Source: docs/content/how-to/sdn/other-sdn-providers.md
+
+---
+title: Other SDN providers
+---
 
 This document explains how to create a HostedCluster that runs an SDN provider different from OVNKubernetes. The document assumes that you already have the required infrastructure in place to create HostedClusters.
 
@@ -31174,6 +32099,10 @@ systemctl enable --now dnsmasq-virt
 
 ## Source: docs/content/labs/Dual/hostedcluster/baremetalhost.md
 
+---
+title: Bare Metal Hosts
+---
+
 ## Bare Metal Hosts
 
 A **BareMetalHost** is an openshift-machine-api object that encompasses both physical and logical details, allowing it to be identified by the Metal3 operator. Subsequently, these details are associated with other Assisted Service objects known as Agents. The structure of this object is as follows:
@@ -31307,6 +32236,10 @@ So now, we need to wait until the nodes join the cluster. The Agents will provid
 ---
 
 ## Source: docs/content/labs/Dual/hostedcluster/hostedcluster.md
+
+---
+title: Hosted Cluster Object
+---
 
 In this section, we will focus on all the related objects necessary to achieve a Disconnected Hosted Cluster deployment.
 
@@ -31567,6 +32500,10 @@ After some time, we will have almost all the pieces in place, and the Control Pl
 
 ## Source: docs/content/labs/Dual/hostedcluster/index.md
 
+---
+title: Hosted Cluster Creation
+---
+
 A Hosted Cluster, as mentioned in the documentation here, is essentially an OCP API endpoint managed by Hypershift. In this context, we will also include the term HostedControlPlane to enhance readability and comprehension. This terminology is further explained in the same link.
 
 The Hosted Cluster comprises two main components:
@@ -31579,6 +32516,10 @@ With this foundational understanding, we can commence our Hosted Cluster deploym
 ---
 
 ## Source: docs/content/labs/Dual/hostedcluster/infraenv.md
+
+---
+title: Infra Env
+---
 
 The `InfraEnv` is an Assisted Service object that includes essential details such as the `pullSecretRef` and the `sshAuthorizedKey`. These details are used to create the RHCOS Boot Image customized specifically for the cluster. Below is the structure of this object:
 
@@ -31616,6 +32557,10 @@ clusters-hosted-dual   hosted   2023-09-11T15:14:10Z
 ---
 
 ## Source: docs/content/labs/Dual/hostedcluster/nodepool.md
+
+---
+title: Node Pools
+---
 
 A `NodePool` is a scalable set of worker nodes associated with a HostedCluster. NodePool machine architectures remain consistent within a specific pool and are independent of the underlying machine architecture of the control plane.
 
@@ -31682,6 +32627,10 @@ clusters    hosted-dual   hosted    0                               False       
 ---
 
 ## Source: docs/content/labs/Dual/hostedcluster/worker-nodes.md
+
+---
+title: Worker Nodes
+---
 
 Regarding the worker nodes, if you are working on real bare metal, this step is crucial to ensure that the details set in the `BareMetalHost` are correctly configured. If not, you will need to debug why it's not functioning as expected.
 
@@ -31775,6 +32724,10 @@ This section is primarily focused on Virtual Machines. If you are working with r
 ---
 
 ## Source: docs/content/labs/Dual/hypervisor/network-manager-dispatcher.md
+
+---
+title: Network Manager Dispatcher
+---
 
 This script modifies the system DNS resolver to prioritize pointing to the `dnsmasq` service (configured later). This ensures that virtual machines can resolve the various domains, routes, and registries required for the different steps of the process.
 
@@ -31895,6 +32848,10 @@ For more info about Kcli please visit the official documentation.
 
 ## Source: docs/content/labs/Dual/hypervisor/redfish-for-vms.md
 
+---
+title: BMC Access for Metal3
+---
+
 In a bare metal environment, the preferred approach is to utilize the actual BMC (Baseboard Management Controller) of the nodes used for the management cluster, which can be managed by Metal3 for discovery and provisioning. However, in a virtual environment, this approach is not feasible. As a workaround, we will use `ksushy`, which is an implementation of `sushy-tools`, allowing us to simulate BMCs for the virtual machines.
 
 To configure `ksushy`, execute the following commands:
@@ -31969,6 +32926,10 @@ Please note that this documentation is designed to be followed in a specific seq
 ---
 
 ## Source: docs/content/labs/Dual/mce/agentserviceconfig.md
+
+---
+title: Agent Service Config
+---
 
 The Agent Service Config object is an essential component of the Assisted Service addon included in MCE/ACM, responsible for Baremetal cluster deployment. When the addon is enabled, you must deploy an operand (CRD) named `AgentServiceConfig` to configure it.
 
@@ -32125,6 +33086,10 @@ assisted-service-668b49548-9m7xw                       2/2     Running   5      
 
 ## Source: docs/content/labs/Dual/mce/index.md
 
+---
+title: Multicluster Engine
+---
+
 The Multicluster Engine (MCE) is a component of the ACM bundle. It plays a crucial role in deploying clusters across multiple providers.
 
 ## Credentials and Authorization
@@ -32139,6 +33104,10 @@ Agent Service Config{ .md-button }
 
 ## Source: docs/content/labs/Dual/mce/multicluster-engine.md
 
+---
+title: ACM/MCE Deployment
+---
+
 The deployment of each component will depend on your needs, follow the next links accordingly:
 
 - ACM Deployment
@@ -32152,6 +33121,10 @@ The deployment of each component will depend on your needs, follow the next link
 ---
 
 ## Source: docs/content/labs/Dual/mgmt-cluster/compact-dual.md
+
+---
+title: OpenShift Compact Dual
+---
 
 In this section, we will discuss how to deploy the Openshift management cluster. To do that, we need to have the following files in place:
 
@@ -32261,6 +33234,10 @@ kcli create cluster openshift --pf mgmt-compact-hub-dual.yaml
 
 ## Source: docs/content/labs/Dual/mgmt-cluster/index.md
 
+---
+title: Management Cluster Provisioning
+---
+
 ## Openshift Management Cluster
 
 This section contains the necessary artifacts to set up an Openshift management cluster based on virtual machines using kcli as the primary tool. Another option is to use dev-scripts, which uses a different approach.
@@ -32271,6 +33248,10 @@ Openshift Compact Dual{ .md-button }
 ---
 
 ## Source: docs/content/labs/Dual/mgmt-cluster/network.md
+
+---
+title: Networking
+---
 
 Firstly, we need to ensure that we have the right networks prepared for use in the Hypervisor. These networks will be used to host both the Management and Hosted clusters.
 
@@ -32320,6 +33301,10 @@ type: routed
 
 ## Source: docs/content/labs/Dual/mirror/ICSP-IDMS.md
 
+---
+title: Image Content Policies
+---
+
 Once the mirroring process is complete, you will have two main objects that need to be applied in the Management Cluster:
 
 1. ICSP (Image Content Source Policies) or IDMS (Image Digest Mirror Set).
@@ -32367,6 +33352,10 @@ ICSP and IDMS{ .md-button }
 ---
 
 ## Source: docs/content/labs/Dual/mirror/mirroring.md
+
+---
+title: Mirroring
+---
 
 The mirroring step can take some time to complete, so we recommend starting with this part once the Registry server is up and running.
 
@@ -32546,6 +33535,10 @@ The root folder for the registry is situated at /opt/registry, and it's structur
 
 ## Source: docs/content/labs/Dual/tls-certificates.md
 
+---
+title: TLS Certificates
+---
+
 !!! important
 
     This section is only relevant in disconnected scenarios. If this doesn't apply to your situation, please proceed to the next section.
@@ -32653,6 +33646,10 @@ Data Plane perspective{ .md-button }
 
 ## Source: docs/content/labs/Dual/watching/watching-cp.md
 
+---
+title: Watching the Control Plane
+---
+
 Now it's a matter of waiting for the cluster to finish the deployment, so let's take a look at some useful commands on the Management cluster side:
 
 ```bash
@@ -32677,6 +33674,10 @@ This is how it looks:
 ---
 
 ## Source: docs/content/labs/Dual/watching/watching-dp.md
+
+---
+title: Watching the Data Plane
+---
 
 If you check the Hosted cluster side you can check how the Operators are progressing and what is the status. To do that we will use these commands
 
@@ -32850,6 +33851,10 @@ systemctl enable --now dnsmasq-virt
 
 ## Source: docs/content/labs/IPv4/hostedcluster/baremetalhost.md
 
+---
+title: Bare Metal Hosts
+---
+
 ## Bare Metal Hosts
 
 A **BareMetalHost** is an openshift-machine-api object that encompasses both physical and logical details, allowing it to be identified by the Metal3 operator. Subsequently, these details are associated with other Assisted Service objects known as Agents. The structure of this object is as follows:
@@ -32981,6 +33986,10 @@ So now, we need to wait until the nodes join the cluster. The Agents will provid
 ---
 
 ## Source: docs/content/labs/IPv4/hostedcluster/hostedcluster.md
+
+---
+title: Hosted Cluster Object
+---
 
 In this section, we will focus on all the related objects necessary to achieve a Disconnected Hosted Cluster deployment.
 **Premises**:
@@ -33238,6 +34247,10 @@ After some time, we will have almost all the pieces in place, and the Control Pl
 
 ## Source: docs/content/labs/IPv4/hostedcluster/index.md
 
+---
+title: Hosted Cluster Creation
+---
+
  Hosted Cluster, as mentioned in the documentation here, is essentially an OCP API endpoint managed by Hypershift. In this context, we will also include the term HostedControlPlane to enhance readability and comprehension. This terminology is further explained in the same link.
 
 The Hosted Cluster consists of two main components:
@@ -33250,6 +34263,10 @@ Now, with this foundational understanding, we can proceed with the deployment of
 ---
 
 ## Source: docs/content/labs/IPv4/hostedcluster/infraenv.md
+
+---
+title: Infra Env
+---
 
 The `InfraEnv` is an Assisted Service object that includes essential details such as the `pullSecretRef` and the `sshAuthorizedKey`. These details are used to create the RHCOS Boot Image customized specifically for the cluster. Below is the structure of this object:
 
@@ -33287,6 +34304,10 @@ clusters-hosted-ipv4   hosted   2023-09-11T15:14:10Z
 ---
 
 ## Source: docs/content/labs/IPv4/hostedcluster/nodepool.md
+
+---
+title: Node Pools
+---
 
 A `NodePool` is a scalable set of worker nodes associated with a HostedCluster. NodePool machine architectures remain consistent within a specific pool and are independent of the underlying machine architecture of the control plane.
 
@@ -33353,6 +34374,10 @@ clusters    hosted-ipv4   hosted    0                               False       
 ---
 
 ## Source: docs/content/labs/IPv4/hostedcluster/worker-nodes.md
+
+---
+title: Worker Nodes
+---
 
 Regarding the worker nodes, if you are working on real bare metal, this step is crucial to ensure that the details set in the `BareMetalHost` are correctly configured. If not, you will need to debug why it's not functioning as expected.
 
@@ -33446,6 +34471,10 @@ This section is entirely dedicated to virtual machine environments. If you are w
 ---
 
 ## Source: docs/content/labs/IPv4/hypervisor/network-manager-dispatcher.md
+
+---
+title: Network Manager Dispatcher
+---
 
 This script modifies the system DNS resolver to prioritize pointing to the `dnsmasq` service (configured later). This ensures that virtual machines can resolve the various domains, routes, and registries required for the different steps of the process.
 
@@ -33566,6 +34595,10 @@ For more info about Kcli please visit the official documentation.
 
 ## Source: docs/content/labs/IPv4/hypervisor/redfish-for-vms.md
 
+---
+title: BMC Access for Metal3
+---
+
 In a bare metal environment, the preferred approach is to utilize the actual BMC (Baseboard Management Controller) of the nodes used for the management cluster, which can be managed by Metal3 for discovery and provisioning. However, in a virtual environment, this approach is not feasible. As a workaround, we will use `ksushy`, which is an implementation of `sushy-tools`, allowing us to simulate BMCs for the virtual machines.
 
 To configure `ksushy` we need to execute these commands:
@@ -33638,6 +34671,10 @@ This documentation is structured to be followed in a specific order:
 ---
 
 ## Source: docs/content/labs/IPv4/mce/agentserviceconfig.md
+
+---
+title: Agent Service Config
+---
 
 The Agent Service Config object is an essential component of the Assisted Service addon included in MCE/ACM, responsible for Baremetal cluster deployment. When the addon is enabled, you must deploy an operand (CRD) named `AgentServiceConfig` to configure it.
 
@@ -33794,6 +34831,10 @@ assisted-service-668b49548-9m7xw                       2/2     Running   5      
 
 ## Source: docs/content/labs/IPv4/mce/index.md
 
+---
+title: Multicluster Engine
+---
+
 The Multicluster Engine (MCE) is a component of the ACM bundle. It plays a crucial role in deploying clusters across multiple providers.
 
 ## Credentials and Authorization
@@ -33808,6 +34849,10 @@ Agent Service Config{ .md-button }
 
 ## Source: docs/content/labs/IPv4/mce/multicluster-engine.md
 
+---
+title: ACM/MCE Deployment
+---
+
 The deployment of each component will depend on your needs, follow the next links accordingly:
 
 - ACM Deployment
@@ -33821,6 +34866,10 @@ The deployment of each component will depend on your needs, follow the next link
 ---
 
 ## Source: docs/content/labs/IPv4/mgmt-cluster/compact-ipv4.md
+
+---
+title: OpenShift Compact IPv4
+---
 
 In this section, we will discuss how to deploy the Openshift management cluster. To do that, we need to have the following files in place:
 
@@ -33919,6 +34968,10 @@ kcli create cluster openshift --pf mgmt-compact-hub-ipv4.yaml
 
 ## Source: docs/content/labs/IPv4/mgmt-cluster/index.md
 
+---
+title: Management Cluster Provisioning
+---
+
 ## Openshift Management Cluster
 
 This section contains the necessary artifacts to set up an Openshift management cluster based on virtual machines using kcli as the primary tool. Another option is to use dev-scripts, which uses a different approach.
@@ -33929,6 +34982,10 @@ Openshift Compact Dual{ .md-button }
 ---
 
 ## Source: docs/content/labs/IPv4/mgmt-cluster/network.md
+
+---
+title: Networking
+---
 
 Firstly, we need to ensure that we have the right networks prepared for use in the Hypervisor. These networks will be used to host both the Management and Hosted clusters.
 
@@ -33977,6 +35034,10 @@ type: routed
 
 ## Source: docs/content/labs/IPv4/mirror/ICSP-IDMS.md
 
+---
+title: Image Content Policies
+---
+
 Once the mirroring process is complete, you will have two main objects that need to be applied in the Management Cluster:
 
 1. ICSP (Image Content Source Policies) or IDMS (Image Digest Mirror Set).
@@ -34024,6 +35085,10 @@ ICSP and IDMS{ .md-button }
 ---
 
 ## Source: docs/content/labs/IPv4/mirror/mirroring.md
+
+---
+title: Mirroring
+---
 
 The mirroring step can take some time to complete, so we recommend starting with this part once the Registry server is up and running.
 
@@ -34203,6 +35268,10 @@ The root folder for the registry is situated at /opt/registry, and it's structur
 
 ## Source: docs/content/labs/IPv4/tls-certificates.md
 
+---
+title: TLS Certificates
+---
+
 !!! important
 
     This section is only relevant in disconnected scenarios. If this doesn't apply to your situation, please proceed to the next section.
@@ -34310,6 +35379,10 @@ Data Plane perspective{ .md-button }
 
 ## Source: docs/content/labs/IPv4/watching/watching-cp.md
 
+---
+title: Watching the Control Plane
+---
+
 Now it's a matter of waiting for the cluster to finish the deployment, so let's take a look at some useful commands on the Management cluster side:
 
 ```bash
@@ -34334,6 +35407,10 @@ This is how it looks:
 ---
 
 ## Source: docs/content/labs/IPv4/watching/watching-dp.md
+
+---
+title: Watching the Data Plane
+---
 
 If you check the Hosted cluster side you can check how the Operators are progressing and what is the status. To do that we will use these commands
 
@@ -34500,6 +35577,10 @@ systemctl enable --now dnsmasq-virt
 
 ## Source: docs/content/labs/IPv6/hostedcluster/baremetalhost.md
 
+---
+title: Bare Metal Hosts
+---
+
 ## Bare Metal Hosts
 
 A **BareMetalHost** is an openshift-machine-api object that encompasses both physical and logical details, allowing it to be identified by the Metal3 operator. Subsequently, these details are associated with other Assisted Service objects known as Agents. The structure of this object is as follows:
@@ -34632,6 +35713,10 @@ So now, we need to wait until the nodes join the cluster. The Agents will provid
 ---
 
 ## Source: docs/content/labs/IPv6/hostedcluster/hostedcluster.md
+
+---
+title: Hosted Cluster Object
+---
 
 In this section, we will focus on all the related objects necessary to achieve a Disconnected Hosted Cluster deployment.
 
@@ -34892,6 +35977,10 @@ After some time, we will have almost all the pieces in place, and the Control Pl
 
 ## Source: docs/content/labs/IPv6/hostedcluster/index.md
 
+---
+title: Hosted Cluster Creation
+---
+
  Hosted Cluster, as mentioned in the documentation here, is essentially an OCP API endpoint managed by Hypershift. In this context, we will also include the term HostedControlPlane to enhance readability and comprehension. This terminology is further explained in the same link.
 
 The Hosted Cluster comprises two main components:
@@ -34904,6 +35993,10 @@ With this foundational understanding, we can commence our Hosted Cluster deploym
 ---
 
 ## Source: docs/content/labs/IPv6/hostedcluster/infraenv.md
+
+---
+title: Infra Env
+---
 
 The `InfraEnv` is an Assisted Service object that includes essential details such as the `pullSecretRef` and the `sshAuthorizedKey`. These details are used to create the RHCOS Boot Image customized specifically for the cluster. Below is the structure of this object:
 
@@ -34941,6 +36034,10 @@ clusters-hosted-ipv6   hosted   2023-09-11T15:14:10Z
 ---
 
 ## Source: docs/content/labs/IPv6/hostedcluster/nodepool.md
+
+---
+title: Node Pools
+---
 
 A `NodePool` is a scalable set of worker nodes associated with a HostedCluster. NodePool machine architectures remain consistent within a specific pool and are independent of the underlying machine architecture of the control plane.
 
@@ -35007,6 +36104,10 @@ clusters    hosted-ipv6   hosted    0                               False       
 ---
 
 ## Source: docs/content/labs/IPv6/hostedcluster/worker-nodes.md
+
+---
+title: Worker Nodes
+---
 
 Regarding the worker nodes, if you are working on real bare metal, this step is crucial to ensure that the details set in the `BareMetalHost` are correctly configured. If not, you will need to debug why it's not functioning as expected.
 
@@ -35099,6 +36200,10 @@ This section is primarily focused on Virtual Machines. If you are working with r
 ---
 
 ## Source: docs/content/labs/IPv6/hypervisor/network-manager-dispatcher.md
+
+---
+title: Network Manager Dispatcher
+---
 
 This script modifies the system DNS resolver to prioritize pointing to the `dnsmasq` service (configured later). This ensures that virtual machines can resolve the various domains, routes, and registries required for the different steps of the process.
 
@@ -35219,6 +36324,10 @@ For more info about Kcli please visit the official documentation.
 
 ## Source: docs/content/labs/IPv6/hypervisor/redfish-for-vms.md
 
+---
+title: BMC Access for Metal3
+---
+
 In a bare metal environment, the preferred approach is to utilize the actual BMC (Baseboard Management Controller) of the nodes used for the management cluster, which can be managed by Metal3 for discovery and provisioning. However, in a virtual environment, this approach is not feasible. As a workaround, we will use `ksushy`, which is an implementation of `sushy-tools`, allowing us to simulate BMCs for the virtual machines.
 
 To configure `ksushy` we need to execute these commands:
@@ -35292,6 +36401,10 @@ This documentation is prepared to be followed in a concrete order:
 ---
 
 ## Source: docs/content/labs/IPv6/mce/agentserviceconfig.md
+
+---
+title: Agent Service Config
+---
 
 The Agent Service Config object is an essential component of the Assisted Service addon included in MCE/ACM, responsible for Baremetal cluster deployment. When the addon is enabled, you must deploy an operand (CRD) named `AgentServiceConfig` to configure it.
 
@@ -35448,6 +36561,10 @@ assisted-service-668b49548-9m7xw                       2/2     Running   5      
 
 ## Source: docs/content/labs/IPv6/mce/index.md
 
+---
+title: Multicluster Engine
+---
+
 The Multicluster Engine (MCE) is a component of the ACM bundle. It plays a crucial role in deploying clusters across multiple providers.
 
 ## Credentials and Authorization
@@ -35462,6 +36579,10 @@ Agent Service Config{ .md-button }
 
 ## Source: docs/content/labs/IPv6/mce/multicluster-engine.md
 
+---
+title: ACM/MCE Deployment
+---
+
 The deployment of each component will depend on your needs, follow the next links accordingly:
 
 - ACM Deployment
@@ -35475,6 +36596,10 @@ The deployment of each component will depend on your needs, follow the next link
 ---
 
 ## Source: docs/content/labs/IPv6/mgmt-cluster/compact-ipv6.md
+
+---
+title: OpenShift Compact IPv6
+---
 
 In this section, we will discuss how to deploy the Openshift management cluster. To do that, we need to have the following files in place:
 
@@ -35578,6 +36703,10 @@ kcli create cluster openshift --pf mgmt-compact-hub-ipv6.yaml
 
 ## Source: docs/content/labs/IPv6/mgmt-cluster/index.md
 
+---
+title: Management Cluster Provisioning
+---
+
 ## Openshift Management Cluster
 
 This section contains the necessary artifacts to set up an Openshift management cluster based on virtual machines using kcli as the primary tool. Another option is to use dev-scripts, which uses a different approach.
@@ -35588,6 +36717,10 @@ Openshift Compact Dual{ .md-button }
 ---
 
 ## Source: docs/content/labs/IPv6/mgmt-cluster/network.md
+
+---
+title: Networking
+---
 
 Firstly, we need to ensure that we have the right networks prepared for use in the Hypervisor. These networks will be used to host both the Management and Hosted clusters.
 
@@ -35636,6 +36769,10 @@ type: routed
 
 ## Source: docs/content/labs/IPv6/mirror/ICSP-IDMS.md
 
+---
+title: Image Content Policies
+---
+
 Once the mirroring process is complete, you will have two main objects that need to be applied in the Management Cluster:
 
 1. ICSP (Image Content Source Policies) or IDMS (Image Digest Mirror Set).
@@ -35683,6 +36820,10 @@ ICSP and IDMS{ .md-button }
 ---
 
 ## Source: docs/content/labs/IPv6/mirror/mirroring.md
+
+---
+title: Mirroring
+---
 
 The mirroring step can take some time to complete, so we recommend starting with this part once the Registry server is up and running.
 
@@ -35862,6 +37003,10 @@ The root folder for the registry is situated at /opt/registry, and it's structur
 
 ## Source: docs/content/labs/IPv6/tls-certificates.md
 
+---
+title: TLS Certificates
+---
+
 !!! important
 
     This section is only relevant in disconnected scenarios. If this doesn't apply to your situation, please proceed to the next section.
@@ -35969,6 +37114,10 @@ Data Plane perspective{ .md-button }
 
 ## Source: docs/content/labs/IPv6/watching/watching-cp.md
 
+---
+title: Watching the Control Plane
+---
+
 Now it's a matter of waiting for the cluster to finish the deployment, so let's take a look at some useful commands on the Management cluster side:
 
 ```bash
@@ -35993,6 +37142,10 @@ This is how it looks:
 ---
 
 ## Source: docs/content/labs/IPv6/watching/watching-dp.md
+
+---
+title: Watching the Data Plane
+---
 
 If you check the Hosted cluster side you can check how the Operators are progressing and what is the status. To do that we will use these commands
 
@@ -36075,6 +37228,10 @@ systemctl enable --now libvirtd
 ---
 
 ## Source: docs/content/labs/common/hypervisor/network-manager-dispatcher.md
+
+---
+title: Network Manager Dispatcher
+---
 
 This script modifies the system DNS resolver to prioritize pointing to the `dnsmasq` service (configured later). This ensures that virtual machines can resolve the various domains, routes, and registries required for the different steps of the process.
 
@@ -36221,6 +37378,10 @@ title: Hypervisor Prerequisites
 ---
 
 ## Source: docs/content/labs/common/mce/agentserviceconfig.md
+
+---
+title: Agent Service Config
+---
 
 The Agent Service Config object is an essential component of the Assisted Service addon included in MCE/ACM, responsible for Baremetal cluster deployment. When the addon is enabled, you must deploy an operand (CRD) named `AgentServiceConfig` to configure it.
 
@@ -36377,6 +37538,10 @@ assisted-service-668b49548-9m7xw                       2/2     Running   5      
 
 ## Source: docs/content/labs/common/mce/index.md
 
+---
+title: Multicluster Engine
+---
+
 The Multicluster Engine (MCE) is a component of the ACM bundle. It plays a crucial role in deploying clusters across multiple providers.
 
 ## Credentials and Authorization
@@ -36391,6 +37556,10 @@ Agent Service Config{ .md-button }
 
 ## Source: docs/content/labs/common/mce/multicluster-engine.md
 
+---
+title: ACM/MCE Deployment
+---
+
 The deployment of each component will depend on your needs, follow the next links accordingly:
 
 - ACM Deployment
@@ -36404,6 +37573,10 @@ The deployment of each component will depend on your needs, follow the next link
 ---
 
 ## Source: docs/content/labs/common/mirror/ICSP-IDMS.md
+
+---
+title: Image Content Policies
+---
 
 Once the mirroring process is complete, you will have two main objects that need to be applied in the Management Cluster:
 
@@ -36452,6 +37625,10 @@ ICSP and IDMS{ .md-button }
 ---
 
 ## Source: docs/content/labs/common/mirror/mirroring.md
+
+---
+title: Mirroring
+---
 
 The mirroring step can take some time to complete, so we recommend starting with this part once the Registry server is up and running.
 
@@ -36631,6 +37808,10 @@ The root folder for the registry is situated at /opt/registry, and it's structur
 
 ## Source: docs/content/labs/common/tls-certificates.md
 
+---
+title: TLS Certificates
+---
+
 !!! important
 
     This section is only relevant in disconnected scenarios. If this doesn't apply to your situation, please proceed to the next section.
@@ -36738,6 +37919,10 @@ Data Plane perspective{ .md-button }
 
 ## Source: docs/content/labs/common/watching/watching-cp.md
 
+---
+title: Watching the Control Plane
+---
+
 Now it's a matter of waiting for the cluster to finish the deployment, so let's take a look at some useful commands on the Management cluster side:
 
 ```bash
@@ -36762,6 +37947,10 @@ This is how it looks:
 ---
 
 ## Source: docs/content/labs/common/watching/watching-dp.md
+
+---
+title: Watching the Data Plane
+---
 
 If you check the Hosted cluster side you can check how the Operators are progressing and what is the status. To do that we will use these commands
 
@@ -36980,6 +38169,10 @@ The addon will detect the removal and redeploy the HyperShift Operator with the 
 ---
 
 ## Source: docs/content/recipes/common/control-plane-metrics-forwarding.md
+
+---
+title: Control Plane Metrics Forwarding
+---
 
 ## Enable Control Plane Metrics Forwarding to Hosted Clusters
 
@@ -37302,6 +38495,10 @@ This deletes the `endpoint-resolver` and `metrics-proxy` from the management clu
 ---
 
 ## Source: docs/content/recipes/common/exposing-dataplane-with-metallb.md
+
+---
+title: Expose Data Plane Ingress via MetalLB
+---
 
 ## Configure MetalLB for HostedCluster's Data Plane
 
@@ -38676,7 +39873,8 @@ ServiceAccount tokens generated by the control plane API server via &ndash;servi
 The default value is kubernetes.default.svc, which only works for in-cluster
 validation.
 If the platform is AWS and this value is set, the controller will update an s3 object with the appropriate OIDC documents (using the serviceAccountSigningKey info) into that issuerURL.
-The expectation is for this s3 url to be backed by an OIDC provider in the AWS IAM.</p>
+The expectation is for this s3 url to be backed by an OIDC provider in the AWS IAM.
+Once set, this value is immutable.</p>
 </td>
 </tr>
 <tr>
@@ -39450,6 +40648,51 @@ If the platform does not support LoadBalancerSourceRanges, this field may have n
 </tr>
 </tbody>
 </table>
+###AWSCSIDriverConfig { #hypershift.openshift.io/v1beta1.AWSCSIDriverConfig }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.CSIDriverOperatorConfig">CSIDriverOperatorConfig</a>)
+</p>
+<p>
+<p>AWSCSIDriverConfig specifies configuration for the AWS EBS CSI driver.
+Once kmsKeyARN is set, it cannot be removed from this struct.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>kmsKeyARN</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>kmsKeyARN is the ARN of an AWS KMS key used to encrypt volumes
+created by the default StorageClass. When set, new PersistentVolumes
+provisioned by the default StorageClass are encrypted with this key
+instead of the AWS account&rsquo;s default EBS encryption key.</p>
+<p>When omitted, no KMS encryption is configured on the default StorageClass.
+EBS volumes use the AWS account&rsquo;s default encryption settings.</p>
+<p>The value may be either the ARN or Alias ARN of a KMS key in the format:
+arn:<partition>:kms:<region>:<account-id>:(key|alias)/<resource-id></p>
+<p>When set, must be between 1 and 2048 characters.</p>
+<p>This field is applied at cluster creation time only and is immutable
+once set. Day-2 changes to storage encryption should be made directly
+on the ClusterCSIDriver resource in the guest cluster.</p>
+<p>The StorageARN role in AWSRolesRef must have kms:Decrypt,
+kms:GenerateDataKeyWithoutPlaintext, and kms:CreateGrant
+permissions on the specified key.</p>
+</td>
+</tr>
+</tbody>
+</table>
 ###AWSCloudProviderConfig { #hypershift.openshift.io/v1beta1.AWSCloudProviderConfig }
 <p>
 (<em>Appears on:</em>
@@ -39502,6 +40745,74 @@ string
 </td>
 <td>
 <p>vpc is the VPC to use for control plane cloud resources.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###AWSClusterResourceTag { #hypershift.openshift.io/v1beta1.AWSClusterResourceTag }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AWSPlatformSpec">AWSPlatformSpec</a>)
+</p>
+<p>
+<p>AWSClusterResourceTag is a tag to apply to AWS resources created for a
+HostedCluster. It extends the base tag with an overridePolicy field that
+controls whether NodePool-level tags can override this tag.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>key</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>key is the key of the tag.
+Must be between 1 and 128 characters and may only contain letters, digits,
+and the characters _ . : / = + - @</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>value</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>value is the value of the tag.
+Must be between 1 and 256 characters and may only contain letters, digits,
+and the characters _ . : / = + - @</p>
+<p>Some AWS service do not support empty values. Since tags are added to
+resources in many services, the length of the tag value must meet the
+requirements of all services.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>overridePolicy</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AWSResourceTagOverridePolicy">
+AWSResourceTagOverridePolicy
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>overridePolicy controls whether a NodePool-level tag with the same key can
+override this HostedCluster-level tag.</p>
+<p>When set to &ldquo;Allow&rdquo;, a NodePool tag with the same key will take precedence
+over this HostedCluster tag. When set to &ldquo;Deny&rdquo; or omitted, the
+HostedCluster value is preserved and the NodePool tag is ignored for that
+key.</p>
 </td>
 </tr>
 </tbody>
@@ -39822,18 +41133,26 @@ Volume
 <td>
 <code>resourceTags</code></br>
 <em>
-<a href="#hypershift.openshift.io/v1beta1.AWSResourceTag">
-[]AWSResourceTag
+<a href="#hypershift.openshift.io/v1beta1.AWSNodePoolResourceTag">
+[]AWSNodePoolResourceTag
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
-<p>resourceTags is an optional list of additional tags to apply to AWS node
-instances. Changes to this field will be propagated in-place to AWS EC2 instances and their initial EBS volumes.
-Volumes created by the storage operator and attached to instances after they are created do not get these tags applied.</p>
-<p>These will be merged with HostedCluster scoped tags, which take precedence in case of conflicts.
-These take precedence over tags defined out of band (i.e., tags added manually or by other tools outside of HyperShift) in AWS in case of conflicts.</p>
+<p>resourceTags is a list of additional tags to apply to AWS resources created
+for the NodePool. Changes to this field will be propagated in-place to AWS
+EC2 instances and their initial EBS volumes. Volumes created by the storage
+operator and attached to instances after they are created do not get these
+tags applied.
+These are merged with HostedCluster-level tags. By default, HostedCluster
+tags take precedence when both specify the same key. To allow a NodePool
+tag to override a specific HostedCluster tag, set overridePolicy to &ldquo;Allow&rdquo;
+on the HostedCluster tag.
+Tags that only exist at the NodePool level (no conflict) are always applied.
+These take precedence over tags defined out of band (i.e., tags added
+manually or by other tools outside of HyperShift) in AWS in case of
+conflicts.</p>
 <p>See <a href="https://docs.aws.amazon.com/general/latest/gr/aws_tagging.html">https://docs.aws.amazon.com/general/latest/gr/aws_tagging.html</a> for
 information on tagging AWS resources. AWS supports a maximum of 50 tags per
 resource. OpenShift reserves 25 tags for its use, leaving 25 tags available
@@ -39852,6 +41171,57 @@ PlacementOptions
 <td>
 <em>(Optional)</em>
 <p>placement specifies the placement options for the EC2 instances.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###AWSNodePoolResourceTag { #hypershift.openshift.io/v1beta1.AWSNodePoolResourceTag }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AWSNodePoolPlatform">AWSNodePoolPlatform</a>)
+</p>
+<p>
+<p>AWSNodePoolResourceTag is a tag to apply to AWS resources created for a
+NodePool. These tags are merged with HostedCluster-level tags. By default,
+HostedCluster tags take precedence when both specify the same key. To allow
+a NodePool tag to override a specific HostedCluster tag, set overridePolicy
+to &ldquo;Allow&rdquo; on the HostedCluster tag.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>key</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>key is the key of the tag.
+Must be between 1 and 128 characters and may only contain letters, digits,
+and the characters _ . : / = + - @</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>value</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>value is the value of the tag.
+Must be between 1 and 256 characters and may only contain letters, digits,
+and the characters _ . : / = + - @</p>
+<p>Some AWS service do not support empty values. Since tags are added to
+resources in many services, the length of the tag value must meet the
+requirements of all services.</p>
 </td>
 </tr>
 </tbody>
@@ -39937,8 +41307,8 @@ integrations such as OIDC.</p>
 <td>
 <code>resourceTags</code></br>
 <em>
-<a href="#hypershift.openshift.io/v1beta1.AWSResourceTag">
-[]AWSResourceTag
+<a href="#hypershift.openshift.io/v1beta1.AWSClusterResourceTag">
+[]AWSClusterResourceTag
 </a>
 </em>
 </td>
@@ -39953,6 +41323,10 @@ for the user.
 Changes to this field will be propagated in-place to AWS resources (VPC Endpoints, EC2 instances, initial EBS volumes and default/endpoint security groups).
 These tags will be propagated to the infrastructure CR in the guest cluster, where other OCP operators might choose to honor this input to reconcile AWS resources created by them.
 Please consult the official documentation for a list of all AWS resources that support in-place tag updates.
+For NodePool-created resources (EC2 instances and their initial EBS volumes), these will be merged with NodePool-scoped tags.
+By default, HostedCluster tags take precedence over NodePool tags when both specify the same key.
+To allow a NodePool tag to override a specific HostedCluster tag, set overridePolicy to &ldquo;Allow&rdquo; on that tag.
+Cluster-scoped resources (VPC endpoints, security groups) only receive HostedCluster tags.
 These take precedence over tags defined out of band (i.e., tags added manually or by other tools outside of HyperShift) in AWS in case of conflicts.</p>
 </td>
 </tr>
@@ -40124,12 +41498,12 @@ They are applied according to the rules defined by the AWS API:
 </table>
 ###AWSResourceTag { #hypershift.openshift.io/v1beta1.AWSResourceTag }
 <p>
-(<em>Appears on:</em>
-<a href="#hypershift.openshift.io/v1beta1.AWSNodePoolPlatform">AWSNodePoolPlatform</a>,
-<a href="#hypershift.openshift.io/v1beta1.AWSPlatformSpec">AWSPlatformSpec</a>)
-</p>
-<p>
 <p>AWSResourceTag is a tag to apply to AWS resources created for the cluster.</p>
+<p>Deprecated: Use AWSClusterResourceTag, AWSNodePoolResourceTag, or
+AWSEndpointServiceResourceTag instead. AWSClusterResourceTag preserves the
+existing tag precedence (HostedCluster wins by default) and adds an optional
+overridePolicy field. Set overridePolicy to &ldquo;Allow&rdquo; on a HostedCluster tag
+to permit NodePool tags to override it.</p>
 </p>
 <table>
 <thead>
@@ -40147,7 +41521,9 @@ string
 </em>
 </td>
 <td>
-<p>key is the key of the tag.</p>
+<p>key is the key of the tag.
+Must be between 1 and 128 characters and may only contain letters, digits,
+and the characters _ . : / = + - @</p>
 </td>
 </tr>
 <tr>
@@ -40158,13 +41534,43 @@ string
 </em>
 </td>
 <td>
-<p>value is the value of the tag.</p>
+<p>value is the value of the tag.
+Must be between 1 and 256 characters and may only contain letters, digits,
+and the characters _ . : / = + - @</p>
 <p>Some AWS service do not support empty values. Since tags are added to
 resources in many services, the length of the tag value must meet the
 requirements of all services.</p>
 </td>
 </tr>
 </tbody>
+</table>
+###AWSResourceTagOverridePolicy { #hypershift.openshift.io/v1beta1.AWSResourceTagOverridePolicy }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AWSClusterResourceTag">AWSClusterResourceTag</a>)
+</p>
+<p>
+<p>AWSResourceTagOverridePolicy specifies whether a HostedCluster-level AWS resource tag
+can be overridden by a NodePool-level tag with the same key.
+This field is only meaningful on HostedCluster-level tags (AWSClusterResourceTag).</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr><td><p>&#34;Allow&#34;</p></td>
+<td><p>AWSResourceTagOverridePolicyAllow permits a NodePool tag to override this
+HostedCluster tag when both share the same key.</p>
+</td>
+</tr><tr><td><p>&#34;Deny&#34;</p></td>
+<td><p>AWSResourceTagOverridePolicyDeny prevents a NodePool tag from overriding
+this HostedCluster tag when both share the same key. The HostedCluster
+value is preserved. This is the default behavior when the field is unset.</p>
+</td>
+</tr></tbody>
 </table>
 ###AWSRoleCredentials { #hypershift.openshift.io/v1beta1.AWSRoleCredentials }
 <p>
@@ -42996,6 +44402,43 @@ used in workload identity authentication for Azure Private Link Service operatio
 </p>
 <p>
 </p>
+###CSIDriverOperatorConfig { #hypershift.openshift.io/v1beta1.CSIDriverOperatorConfig }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.OperatorConfiguration">OperatorConfiguration</a>)
+</p>
+<p>
+<p>CSIDriverOperatorConfig specifies configuration for the CSI driver operator
+in the hosted cluster. Platform-specific configuration is nested inside
+the operator&rsquo;s config, following the ingress operator pattern where
+platform branching is inside the operator&rsquo;s own struct.
+Once the aws field is set, it cannot be removed.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>aws,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AWSCSIDriverConfig">
+AWSCSIDriverConfig
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>aws specifies configuration for the AWS EBS CSI driver operator.
+Once set, this field cannot be removed.</p>
+</td>
+</tr>
+</tbody>
+</table>
 ###Capabilities { #hypershift.openshift.io/v1beta1.Capabilities }
 <p>
 (<em>Appears on:</em>
@@ -43391,7 +44834,9 @@ github.com/openshift/api/config/v1.AuthenticationSpec
 <td>
 <em>(Optional)</em>
 <p>authentication specifies cluster-wide settings for authentication (like OAuth and
-webhook token authenticators).</p>
+webhook token authenticators).
+Note: the serviceAccountIssuer field within this configuration is ignored; the
+HostedCluster&rsquo;s spec.issuerURL is always used as the service account issuer instead.</p>
 </td>
 </tr>
 <tr>
@@ -47575,7 +49020,8 @@ ServiceAccount tokens generated by the control plane API server via &ndash;servi
 The default value is kubernetes.default.svc, which only works for in-cluster
 validation.
 If the platform is AWS and this value is set, the controller will update an s3 object with the appropriate OIDC documents (using the serviceAccountSigningKey info) into that issuerURL.
-The expectation is for this s3 url to be backed by an OIDC provider in the AWS IAM.</p>
+The expectation is for this s3 url to be backed by an OIDC provider in the AWS IAM.
+Once set, this value is immutable.</p>
 </td>
 </tr>
 <tr>
@@ -53202,7 +54648,8 @@ This value must be a valid IPv4 or IPv6 address.</p>
 <a href="#hypershift.openshift.io/v1beta1.HostedControlPlaneSpec">HostedControlPlaneSpec</a>)
 </p>
 <p>
-<p>OperatorConfiguration specifies configuration for individual OCP operators in the cluster.</p>
+<p>OperatorConfiguration specifies configuration for individual OCP operators in the cluster.
+Once the csiDriverConfig field is set, it cannot be removed.</p>
 </p>
 <table>
 <thead>
@@ -53253,6 +54700,23 @@ IngressOperatorSpec
 <em>(Optional)</em>
 <p>ingressOperator specifies the configuration for the Ingress Operator in the hosted cluster.
 This allows configuring how the default ingress controller endpoints are published.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>csiDriverConfig,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.CSIDriverOperatorConfig">
+CSIDriverOperatorConfig
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>csiDriverConfig specifies configuration for the CSI driver operator in the hosted cluster.
+This allows configuring platform-specific CSI driver behavior such as KMS encryption
+for the default StorageClass.
+Once set, this field cannot be removed.</p>
 </td>
 </tr>
 </tbody>
@@ -57565,6 +59029,10 @@ Note: the kube-apiserver will no longer be exposed through a dedicated LB servic
 
 ## Source: docs/content/reference/architecture/mce-and-agent.md
 
+---
+title: Multicluster Engine and Agent
+---
+
 **Introduction**
 
 This section elucidates the collaboration between Multicluster Engine and Agent to facilitate in-house deployments. Detailed documentation for each of the network stacks can be found in the *Self-Managed Laboratories* section. If you intend to set up a self-managed environment, please proceed to that section and follow the provided steps.
@@ -58111,6 +59579,459 @@ classDiagram
 
 ---
 
+## Source: docs/content/reference/e2e-v2-test-flow.md
+
+# E2E v2 Test Flow
+
+This document describes the end-to-end flow of the HyperShift v2 e2e test framework,
+from CI job trigger through test execution and teardown. It covers process boundaries,
+inter-process communication, and the sequencing of mutually exclusive tests.
+
+## Contents
+
+- Ginkgo Decorators, Hooks, and Labels for Test Isolation
+    - Decorators
+    - Hooks
+    - Labels
+    - How These Layers Compose
+- High-Level Flow
+- Inside a test-e2e-v2 Process (Ginkgo Lifecycle)
+- Process Boundary Summary
+- Sequencing of Mutually Exclusive Tests
+- Inter-Process Communication
+
+## Ginkgo Decorators, Hooks, and Labels for Test Isolation
+
+The v2 framework uses Ginkgo features at two levels to keep tests from interfering
+with each other: the [**`run-tests` orchestrator**][run-tests] isolates test groups
+into separate OS processes targeting different clusters, and **within each process**,
+Ginkgo decorators and hooks manage execution order, state mutation, cleanup, and
+reporting semantics.
+
+### Decorators
+
+| Decorator | Purpose | Used by |
+|-----------|---------|---------|
+| **`Ordered`** | Specs in the container run in declaration order. If one fails, subsequent specs in the same container are skipped. Prevents dependent steps from running against corrupted state. | [BackupRestore, EtcdSnapshot][backup-restore-test], [EtcdChaos][etcd-chaos-test], [AzurePrivateLink, AzureEndpointAccess][azure-test], [PKI operator TLS modification][pki-test], [AdmissionPolicies][security-test], [ImageRegistryCapability][image-registry-test], [ExternalOIDCKeycloakAuth][external-oidc-test] |
+| **`Serial`** | Specs never run concurrently with other specs, even if Ginkgo parallel mode were enabled. Applied alongside `Ordered` when a test mutates shared cluster state that could interfere with other specs. | [BackupRestore, EtcdSnapshot][backup-restore-test] (separate binary), [PKI operator TLS modification][pki-test] |
+
+`Ordered` is the primary tool for inter-test dependencies within a single feature
+(e.g., backup must complete before restore can start). `Serial` adds the guarantee
+that no other spec in the process runs at the same time, which matters for tests
+that mutate cluster-wide resources like HostedCluster configuration or etcd state.
+In practice, since `run-tests` does not pass `--procs` to Ginkgo, all specs within
+a process already run sequentially — but `Serial` makes the constraint explicit and
+future-proof.
+
+### Hooks
+
+| Hook | Scope | Purpose |
+|------|-------|---------|
+| **`BeforeSuite`** | Once per process | Initializes the global [`TestContext`][test-context] from env vars (cluster name, namespace, artifact dir, management client). Runs before any spec. See [`suite_test.go`][suite-test]. |
+| **`BeforeAll`** | Once per `Ordered` container | Initializes shared state for an ordered sequence (e.g., resolve `TestContext`, validate platform support, capture original config for later restoration). Runs once before the first spec in the container. |
+| **`AfterAll`** | Once per `Ordered` container | Tears down shared state created by `BeforeAll` (e.g., delete backup resources, restore original HostedCluster config). |
+| **`BeforeEach`** | Before every spec | Top-level: resolves `TestContext` and validates the hosted cluster resource exists on the management cluster. (`Ordered` containers use `BeforeAll` for the same purpose.) Nested (in `Context`/`When` blocks) or inline in specs: runs platform guards (`Skip()` if wrong platform) or other precondition checks. |
+| **`DeferCleanup`** | After each spec (LIFO) | Restores mutated state or deletes created resources. Registered immediately after mutation/creation so cleanup runs even if the test panics or fails before reaching manual deletion. |
+
+The `BeforeAll`/`AfterAll` pair is critical for lifecycle tests that share expensive
+preconditions across multiple ordered specs (e.g., backup-restore creates a backup
+once, then multiple specs verify different aspects of the restore). Without `Ordered`,
+`BeforeAll`/`AfterAll` cannot be used — Ginkgo enforces this at the framework level.
+
+### Labels
+
+| Label | Effect |
+|-------|--------|
+| **`lifecycle`** | Marks tests that mutate cluster state (upgrades, nodepool scaling, etcd chaos, global pull secret, OS image stream, autoscaling, platform-specific lifecycle). The simple [`hypershift-e2e-v2` CI chain][e2e-v2-chain] filters these out with `--ginkgo.label-filter='!lifecycle'` so that read-only compliance runs don't trigger mutations. The `run-tests` orchestrator runs lifecycle tests on dedicated clusters via specific label filters. |
+| **`Informing`** | The custom [`InformingAwareFailHandler`][fail-handler] converts failures on specs with this label into skips. The test appears as "skipped" in JUnit XML rather than "failed", so it doesn't block the CI job. Used for tests validating optional or in-progress features (e.g., metrics forwarding, custom labels/tolerations). |
+| **Feature/platform labels** (e.g., `self-managed-azure-public`, `nodepool-autoscaling`, `control-plane-upgrade`) | Control which specs run in which `test-e2e-v2` process. The [`run-tests` orchestrator][run-tests] passes `--ginkgo.label-filter` with non-overlapping label sets so each process only runs specs relevant to its assigned cluster variant. The label-to-cluster mapping is defined by [`TestMatrix`][azure-platform] in the platform config. |
+
+### How These Layers Compose
+
+```
+run-tests orchestrator
+├── Process 1 (public cluster): --ginkgo.label-filter="self-managed-azure-public || nodepool-lifecycle || ..."
+│   ├── Describe "NodePool Lifecycle" [Ordered] ← specs run in order, share BeforeAll setup
+│   │   ├── BeforeAll: create test nodepool
+│   │   ├── It "should scale up" ← mutation test
+│   │   ├── It "should scale down"
+│   │   └── AfterAll: delete test nodepool
+│   ├── Describe "Control Plane Workloads" ← read-only, no Ordered needed
+│   │   ├── It "should have resource requests" ← stateless assertion
+│   │   └── Context "Custom labels" [Informing] ← failure → skip, non-blocking
+│   └── ...
+├── Process 2 (private cluster): --ginkgo.label-filter="self-managed-azure-private || ..."
+│   └── ...
+└── Sequential group (upgrade cluster):
+    ├── Process 6a: --ginkgo.label-filter="control-plane-upgrade" ← must finish before 6b
+    │   └── Describe "Control Plane Upgrade" ← triggers version rollout
+    └── Process 6b: --ginkgo.label-filter="etcd-chaos" ← only runs if 6a passed
+        └── Describe "Etcd Chaos" [Ordered] ← specs run in order, BeforeAll snapshots etcd
+```
+
+Cluster-level isolation (different processes target different clusters) prevents
+inter-group interference. Within a process, `Ordered`/`Serial` prevent inter-spec
+interference for mutation-heavy features. `DeferCleanup` ensures each spec restores
+what it touched. `Informing` decouples experimental coverage from gate status. The
+`lifecycle` label separates mutation tests from read-only compliance runs at the CI
+job level.
+
+## High-Level Flow
+
+The diagram below shows the general v2 e2e flow. The framework is
+platform-agnostic — each platform implements the [`PlatformConfig`][platform]
+interface — but Azure is currently the only implementation and serves as the
+reference. The concrete examples here follow the
+[`e2e-azure-v2-self-managed`][ci-job-config] CI job and its
+[workflow][workflow]. ci-operator builds the [`hypershift-tests`][dockerfile-e2e]
+image (via [`Dockerfile.e2e`][dockerfile-e2e], which invokes several
+[`Makefile`][makefile] targets), then chains together cluster creation, test
+execution, and teardown steps.
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    box Prow Cluster
+        participant Prow
+        participant CIO as ci-operator
+    end
+
+    box CI Pod (hypershift-tests image)
+        participant Shell as Step Shell<br/>(bash)
+        participant CG as create-guests<br/>(Go binary)
+        participant RT as run-tests<br/>(Go binary)
+        participant DG as destroy-guests<br/>(Go binary)
+    end
+
+    box Test Subprocesses (forked by run-tests)
+        participant TP as test-e2e-v2<br/>[public cluster]
+        participant TPr as test-e2e-v2<br/>[private cluster]
+        participant TO as test-e2e-v2<br/>[oauth-lb cluster]
+        participant TA as test-e2e-v2<br/>[autoscaling cluster]
+        participant TE as test-e2e-v2<br/>[external-oidc cluster]
+        participant TU as test-e2e-v2<br/>[upgrade cluster]
+    end
+
+    box Cloud Infrastructure
+        participant MC as Management Cluster<br/>(nested OCP)
+        participant HC as HostedClusters<br/>(6 variants)
+    end
+
+    Note over Prow,HC: Phase 1: CI Job Setup (openshift-release workflow)
+
+    Prow->>CIO: Trigger job (PR event / periodic)
+    CIO->>CIO: Build hypershift-tests image (Dockerfile.e2e)
+
+    Note over CIO: Key v2 binaries:<br/>test-e2e-v2, test-backuprestore, create-guests,<br/>run-tests, destroy-guests, dump-guests, hypershift
+
+    CIO->>CIO: Execute workflow pre steps
+
+    Note over CIO,MC: Pre steps (sequential):<br/>1. ipi-install-rbac<br/>2. hypershift-setup-nested-management-cluster<br/>3. hypershift-azure-setup-private-link<br/>4. hypershift-install (HyperShift operator)<br/>5. hypershift-resolve-nodepool-releases<br/>6. create-selfmanaged-guests (shown below)
+
+    Note over Prow,HC: Phase 2: Guest Cluster Creation (create-guests binary, pre step 6)
+
+    CIO->>Shell: Run create-selfmanaged-guests step
+    Shell->>Shell: export KUBECONFIG=management_cluster_kubeconfig
+    Shell->>CG: /hypershift/bin/create-guests
+
+    activate CG
+    Note over CG: Single Go process, phases run sequentially.<br/>Phases 1, 3, and 5 use internal goroutines for parallelism.
+
+    CG->>MC: Phase 0: PreCreate hooks<br/>(deploy Keycloak for external-oidc)
+
+    par Phase 1: Create 6 clusters in parallel (goroutines + exec.Command)
+        CG->>MC: Create public-{hash}
+        CG->>MC: Create private-{hash} (Private endpoint access)
+        CG->>MC: Create oauth-lb-{hash} (OAuth via LoadBalancer)
+        CG->>MC: Create upgrade-{hash} (N-1 release, HA control plane)
+        CG->>MC: Create autoscaling-{hash}
+        CG->>MC: Create external-oidc-{hash}
+    end
+    Note right of CG: Each calls `hypershift create cluster azure`<br/>with variant-specific flags
+
+    CG->>MC: Phase 2: PostCreate hooks<br/>(patch public cluster OperatorConfiguration)
+
+    CG->>MC: Phase 3: Watch all clusters for Available condition<br/>(controller-runtime Watch, 45m timeout)
+    MC-->>CG: All 6 clusters Available
+
+    CG->>MC: Phase 4: PostAvailable hooks
+
+    CG->>MC: Phase 5: Watch for version rollout completion<br/>(VersionState=Completed on all history entries)
+    MC-->>CG: All 6 clusters rolled out
+
+    CG->>MC: Phase 6: PostVersionRollout hooks<br/>(patch external-oidc cluster with OIDC config)
+
+    CG->>Shell: Phase 7: Write cluster names and<br/>platform-specific config to SHARED_DIR
+    deactivate CG
+
+    Note over Prow,HC: Phase 3: Test Execution (run-tests binary)
+
+    CIO->>Shell: Run run-e2e-v2-selfmanaged step
+    Shell->>Shell: export KUBECONFIG=management_cluster_kubeconfig
+    Shell->>RT: /hypershift/bin/run-tests
+
+    activate RT
+    Note over RT: Reads HYPERSHIFT_PLATFORM → builds TestMatrix<br/>Reads cluster names and platform config from SHARED_DIR
+
+    RT->>RT: PlatformConfig.SetupTestEnv()<br/>(set env vars from SHARED_DIR files)
+
+    par Parallel test groups (each is a goroutine calling exec.Command)
+        RT->>TP: test-e2e-v2 → public-{hash}<br/>(platform + feature tests)
+        activate TP
+
+        RT->>TPr: test-e2e-v2 → private-{hash}<br/>(private topology + compliance)
+        activate TPr
+
+        RT->>TO: test-e2e-v2 → oauth-lb-{hash}<br/>(OAuth, health, metrics, registry)
+        activate TO
+
+        RT->>TA: test-e2e-v2 → autoscaling-{hash}
+        activate TA
+
+        RT->>TE: test-e2e-v2 → external-oidc-{hash}
+        activate TE
+    end
+    Note right of RT: Each subprocess receives cluster name via<br/>E2E_HOSTED_CLUSTER_NAME env var and label<br/>filter via --ginkgo.label-filter
+
+    par Sequential group: upgrade-and-chaos (single goroutine, steps run in order)
+        RT->>TU: test-e2e-v2 → upgrade-{hash}<br/>(upgrade tests)
+        activate TU
+        Note over TU: Process 6a (upgrade)
+        TU-->>RT: exit 0 (upgrade passed)
+        deactivate TU
+
+        RT->>TU: test-e2e-v2 → upgrade-{hash}<br/>(etcd-chaos tests, same cluster)
+        activate TU
+        Note over TU: Process 6b (etcd-chaos)
+        TU-->>RT: exit 0 or error
+        deactivate TU
+    end
+
+    TP-->>RT: exit code
+    deactivate TP
+    TPr-->>RT: exit code
+    deactivate TPr
+    TO-->>RT: exit code
+    deactivate TO
+    TA-->>RT: exit code
+    deactivate TA
+    TE-->>RT: exit code
+    deactivate TE
+
+    RT->>RT: Collect results, report pass/fail summary
+    RT-->>Shell: exit code (0 if all passed)
+    deactivate RT
+
+    Note over Prow,HC: Phase 4: Teardown (post steps, always run)
+
+    CIO->>Shell: Run dump-selfmanaged-guests step
+    Shell->>Shell: /hypershift/bin/dump-guests<br/>(collect artifacts from all clusters)
+
+    CIO->>Shell: Run destroy-selfmanaged-guests step (best_effort: true)
+    Shell->>DG: /hypershift/bin/destroy-guests
+    activate DG
+    par Destroy all 6 clusters in parallel
+        DG->>MC: hypershift destroy cluster azure<br/>for each variant (40m grace period)
+    end
+    DG-->>Shell: exit code
+    deactivate DG
+
+    CIO->>CIO: Destroy nested management cluster
+    CIO->>Prow: Report results (JUnit XML)
+```
+
+## Inside a test-e2e-v2 Process (Ginkgo Lifecycle)
+
+Each `test-e2e-v2` invocation is a single OS process running the Ginkgo v2 test
+framework. The process is a compiled Go test binary (`go test -c`) with the `e2ev2`
+build tag.
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    participant RT as run-tests<br/>(parent process)
+    participant G as test-e2e-v2<br/>(Ginkgo process)
+    participant MC as Management<br/>Cluster API
+    participant HCA as HostedCluster<br/>API (guest)
+
+    RT->>G: exec test-e2e-v2 with label filter,<br/>env: E2E_HOSTED_CLUSTER_NAME/NAMESPACE
+
+    activate G
+    Note over G: Go test framework calls TestE2EV2(t)<br/>which calls ginkgo.RunSpecs(t, "hypershift-e2e")
+
+    G->>G: BeforeSuite: SetupTestContextFromEnv()<br/>(management client, cluster identity, artifact dir)
+
+    Note over G: Ginkgo builds spec tree from all<br/>var _ = Describe(...) registrations
+
+    G->>G: Label filter prunes spec tree<br/>(only specs matching --ginkgo.label-filter run)
+
+    loop For each matching spec (It block)
+        G->>G: BeforeEach: get TestContext,<br/>platform guard (Skip if wrong platform)
+
+        alt First access to HostedCluster (sync.Once)
+            G->>MC: Get HostedCluster {name}/{namespace}
+            MC-->>G: HostedCluster object (cached for process lifetime)
+        end
+
+        alt First access to HostedCluster client (sync.Once)
+            G->>MC: Get kubeconfig Secret from HC status
+            MC-->>G: Secret with kubeconfig data
+            G->>G: Build REST config + controller-runtime client<br/>(cached for process lifetime)
+        end
+
+        G->>MC: Test assertions against management cluster
+        G->>HCA: Test assertions against hosted cluster
+
+        alt Test has "Informing" label and fails
+            G->>G: InformingAwareFailHandler converts<br/>Fail → Skip (test marked skipped, not failed)
+        else Test fails normally
+            G->>G: Standard Ginkgo Fail (spec marked failed)
+        end
+
+        G->>G: DeferCleanup runs (restore mutations)
+    end
+
+    G->>G: Write JUnit XML report to ARTIFACT_DIR
+    G-->>RT: exit code (0=all passed, 1=failures)
+    deactivate G
+```
+
+## Process Boundary Summary
+
+| Process | Binary | Lifecycle | Communication |
+|---------|--------|-----------|---------------|
+| **ci-operator** | CI infrastructure | Manages the entire [job][ci-job-config] | Runs [workflow steps][workflow] as pods |
+| **Step shell** | bash | One per CI step | Sets KUBECONFIG, runs Go binaries ([create][create-guests-sh], [run][run-tests-chain], [destroy][destroy-guests-chain]) |
+| **[create-guests][]** | `/hypershift/bin/create-guests` | Runs once in pre step | Forks `hypershift` CLI via `exec.Command`, writes cluster names and platform-specific config to `SHARED_DIR` |
+| **[run-tests][]** | `/hypershift/bin/run-tests` | Runs once in test step | Forks one `test-e2e-v2` process per test group via `exec.Command`. Env vars pass cluster name + config. Collects exit codes. |
+| **test-e2e-v2** | `/hypershift/bin/test-e2e-v2` | One process per test group (7 total, up to 6 concurrent) | Reads env vars for cluster identity. Talks to management + hosted cluster APIs via kubeconfig. Writes JUnit XML to `ARTIFACT_DIR`. Entry point: [`suite_test.go`][suite-test]. |
+| **[destroy-guests][]** | `/hypershift/bin/destroy-guests` | Runs once in post step | Forks `hypershift` CLI via `exec.Command` for each cluster (parallel goroutines). |
+
+## Sequencing of Mutually Exclusive Tests
+
+Mutual exclusion between test groups is achieved through **cluster isolation** and
+**sequential groups**, not through in-process locking:
+
+```mermaid
+flowchart TD
+    subgraph TestMatrix["TestMatrix (defined by PlatformConfig)"]
+        subgraph Parallel["Parallel Groups (all run concurrently)"]
+            P1["public cluster<br/>(platform + feature tests)"]
+            P2["private cluster<br/>(private topology + compliance)"]
+            P3["oauth-lb cluster<br/>(OAuth, health, metrics, registry)"]
+            P4["autoscaling cluster"]
+            P5["external-oidc cluster"]
+        end
+
+        subgraph Sequential["Sequential Group: upgrade-and-chaos"]
+            direction TB
+            S1["Step 1: upgrade tests<br/>label: control-plane-upgrade"]
+            S2["Step 2: etcd-chaos tests<br/>label: etcd-chaos"]
+            S1 -->|"pass → continue"| S2
+            S1 -.->|"fail → skip remaining"| SKIP["Steps skipped"]
+        end
+    end
+
+    RT["run-tests orchestrator"] --> Parallel
+    RT --> Sequential
+
+```
+
+**Key mechanisms:**
+
+1. **Cluster-per-group isolation**: Each parallel test group targets a **different
+   HostedCluster**. Tests within a group share one cluster but different groups never
+   touch the same cluster. This eliminates inter-group interference without locks.
+
+2. **Label-based partitioning**: Ginkgo's `--ginkgo.label-filter` ensures each
+   `test-e2e-v2` process only runs specs matching its assigned labels. The label
+   sets are [non-overlapping across groups][azure-platform], so the same spec never
+   runs in two processes.
+
+3. **Sequential groups for ordered dependencies**: The `upgrade-and-chaos`
+   [sequential group][azure-platform] runs upgrade first, then etcd-chaos on the
+   **same cluster**. The [`run-tests` orchestrator][run-tests] enforces ordering by
+   running steps sequentially within a single goroutine. If upgrade fails, etcd-chaos
+   is skipped (the goroutine returns early).
+
+4. **No in-process mutex**: Because each `test-e2e-v2` process targets exactly one
+   cluster and runs non-overlapping label sets, there is no need for mutexes or
+   other synchronization between test specs. Ginkgo runs specs within a single
+   process serially by default (no `--procs` flag is passed).
+
+## Inter-Process Communication
+
+```mermaid
+flowchart LR
+    subgraph "SHARED_DIR (filesystem)"
+        F1["cluster-name-{variant}<br/>(one per cluster)"]
+        F2["management_cluster_kubeconfig"]
+        F3["platform-specific config<br/>(OIDC bundles, subnet IDs, etc.)"]
+    end
+
+    CG["create-guests"] -->|"writes"| F1
+    CG -->|"writes"| F3
+
+    RT["run-tests"] -->|"reads"| F1
+    RT -->|"reads"| F3
+    RT -->|"env vars"| TB["test-e2e-v2<br/>(subprocess)"]
+    TB -->|"JUnit XML"| AD["ARTIFACT_DIR"]
+
+    DG["destroy-guests"] -->|"derives names from<br/>PROW_JOB_ID + sha256"| MC["Management Cluster"]
+
+```
+
+- **SHARED_DIR**: Filesystem directory shared across all CI steps within a job.
+  [`create-guests`][create-guests] writes cluster names and platform-specific
+  config; [`run-tests`][run-tests] reads them. This is the primary IPC mechanism
+  between CI steps.
+- **Environment variables**: `run-tests` passes cluster identity to each `test-e2e-v2`
+  subprocess via `E2E_HOSTED_CLUSTER_NAME` and `E2E_HOSTED_CLUSTER_NAMESPACE` env vars.
+- **PROW_JOB_ID + SHA256**: [`destroy-guests`][destroy-guests] does not read
+  SHARED_DIR cluster names. Instead, it re-derives cluster names deterministically
+  from `PROW_JOB_ID` using the same [`DeriveClusterName()`][platform] function as
+  `create-guests`. This makes teardown idempotent and independent of whether creation
+  succeeded.
+- **KUBECONFIG**: All processes authenticate to the management cluster via the
+  kubeconfig file at `${SHARED_DIR}/management_cluster_kubeconfig`, set up by the
+  nested management cluster provisioning step.
+- **Exit codes**: `run-tests` collects exit codes from all `test-e2e-v2` subprocesses
+  and exits non-zero if any group failed.
+- **JUnit XML**: Each `test-e2e-v2` process writes a separate JUnit report to
+  `ARTIFACT_DIR`. ci-operator collects these for Sippy/Prow reporting.
+
+<!-- HyperShift repo links (openshift/hypershift, main branch) -->
+[run-tests]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/cmd/run-tests/main.go
+[create-guests]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/cmd/create-guests/main.go
+[destroy-guests]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/cmd/destroy-guests/main.go
+[suite-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/suite_test.go
+[test-context]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/internal/test_context.go
+[fail-handler]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/internal/fail_handler.go
+[platform]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/lifecycle/platform.go
+[azure-platform]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/lifecycle/azure.go
+[backup-restore-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/backup_restore_test.go
+[etcd-chaos-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/etcd_chaos_test.go
+[azure-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/hosted_cluster_azure_test.go
+[pki-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/control_plane_pki_operator_test.go
+[security-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/hosted_cluster_security_test.go
+[image-registry-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/hosted_cluster_image_registry_test.go
+[external-oidc-test]: https://github.com/openshift/hypershift/blob/main/test/e2e/v2/tests/hosted_cluster_external_oidc_test.go
+[dockerfile-e2e]: https://github.com/openshift/hypershift/blob/main/Dockerfile.e2e
+[makefile]: https://github.com/openshift/hypershift/blob/main/Makefile
+
+<!-- openshift/release repo links (master branch) -->
+[ci-job-config]: https://github.com/openshift/release/blob/master/ci-operator/config/openshift/hypershift/openshift-hypershift-main.yaml
+[workflow]: https://github.com/openshift/release/blob/master/ci-operator/step-registry/hypershift/azure/e2e/v2-self-managed/hypershift-azure-e2e-v2-self-managed-workflow.yaml
+[create-guests-sh]: https://github.com/openshift/release/blob/master/ci-operator/step-registry/hypershift/azure/create-selfmanaged-guests/hypershift-azure-create-selfmanaged-guests-commands.sh
+[run-tests-chain]: https://github.com/openshift/release/blob/master/ci-operator/step-registry/hypershift/azure/run-e2e-v2-selfmanaged/hypershift-azure-run-e2e-v2-selfmanaged-chain.yaml
+[destroy-guests-chain]: https://github.com/openshift/release/blob/master/ci-operator/step-registry/hypershift/azure/destroy-selfmanaged-guests/hypershift-azure-destroy-selfmanaged-guests-chain.yaml
+[e2e-v2-chain]: https://github.com/openshift/release/blob/master/ci-operator/step-registry/hypershift/e2e-v2/hypershift-e2e-v2-chain.yaml
+
+
+---
+
 ## Source: docs/content/reference/goals-and-design-invariants.md
 
 # Project goals
@@ -58155,6 +60076,916 @@ These are desired project goals which drive the design invariants stated below. 
 
 ---
 
+## Source: docs/content/reference/ho-release-gating/architecture.md
+
+# Architecture
+
+## End-to-End Flow
+
+All release gating resources run on the Konflux production cluster **stone-prd-rh01**. Two namespaces are involved:
+
+| Namespace | Owner | Resources |
+|-----------|-------|-----------|
+| `crt-redhat-acm-tenant` | HyperShift team | CronJob, ITS, Snapshot, PipelineRun, Release, ReleasePlan, ServiceAccounts, Secrets |
+| `rhtap-releng-tenant` | Release Engineering | ReleasePlanAdmission, managed pipeline |
+
+The following sequence diagram shows the complete nightly promotion cycle, from the CronJob trigger through image promotion to Quay.
+
+```mermaid
+sequenceDiagram
+    participant CJ as CronJob
+    participant IS as Integration Service
+    participant PR as PipelineRun
+    participant Prow as Prow CI (Gangway)
+    participant KA as KubeArchive
+    participant RS as Release Service
+    participant MP as Managed Pipeline
+    participant Quay as Quay.io
+    participant Slack as Slack
+
+    Note over CJ: Runs at 03:15 UTC nightly
+
+    CJ->>CJ: (1) Resolve latest Snapshot
+    CJ->>IS: (2) Label Snapshot with ITS trigger
+
+    IS->>IS: (3) Detect label, evaluate ITS
+    IS->>PR: (4) Create PipelineRun
+
+    PR->>PR: (5) clone-lib + extract-image
+    PR->>Prow: (6) Trigger blocking + informing jobs
+
+    Note over PR,Prow: Poll every 10 min (45 min initial delay, 4h timeout)
+
+    Prow-->>PR: (7) Job results
+
+    PR->>PR: (8) evaluate-results
+
+    alt
+        rect rgb(200, 230, 201)
+            Note over CJ,Slack: Gate passed
+            PR->>RS: (9) Create Release CR
+            RS->>MP: (10) Match ReleasePlan/Admission
+            MP->>Quay: (11) Push image
+            PR->>Slack: (12) Notify success
+        end
+    else
+        rect rgb(255, 205, 210)
+            Note over CJ,Slack: Gate failed
+            PR->>KA: (13) Fetch PipelineRun history
+            KA-->>PR: Historical runs for this ITS
+            PR->>PR: (14) Check failure streak
+            alt
+                Note over PR,Slack: Streak below threshold or no streak
+                PR->>Slack: (15a) Notify failure
+            else
+                rect rgb(239, 154, 154)
+                    Note over PR,Slack: Streak >= stale-threshold-days
+                    PR->>Slack: (15b) Stale promotion alert<br/>Includes failure history and streak duration
+                end
+            end
+        end
+    end
+```
+
+!!! note
+    Links to `gitlab.cee.redhat.com` require Red Hat VPN and access to the repository. See Prerequisites.
+
+**Step-by-step:**
+
+1. The `CronJob` fires at 03:15 UTC and resolves the latest Snapshot for the `hypershift-operator` application.
+2. The CronJob iterates over the `ITS_NAMES` environment variable and labels the Snapshot for each service gate sequentially. This allows a single CronJob to trigger multiple gates (e.g. ARO HCP, ROSA).
+3. The Integration Service detects the label and matches it to the corresponding `IntegrationTestScenario` (ITS). The ITS has `contexts: disabled`, so it only triggers from explicit CronJob labels, not from every new Snapshot.
+4. The Integration Service creates a PipelineRun by resolving the `PipelineRun template` and the `Pipeline` via git resolver (see Pipeline Resolution below). The ITS parameters (blocking/informing job lists, gate label, release plan name) are injected into the PipelineRun.
+5. The pipeline starts with `clone-lib` (sparse git clone of the Python modules to a shared PVC workspace) followed by `extract-image` (validates the HO container image from the Snapshot JSON).
+6. `run-e2e` triggers all blocking and informing Prow periodic jobs via the Gangway REST API, with the HO image injected as an environment override.
+7. The task polls Gangway for job results (45 min initial delay, then every 10 min, up to 4h timeout).
+8. `evaluate-results` applies the gate verdict: all blocking tests must pass (AND logic). Informing tests are reported but do not affect the verdict.
+9. If the gate passed, `create-release` creates a Release CR referencing the validated Snapshot and the `ReleasePlan`.
+10. The Release Service matches the Release CR to a `ReleasePlanAdmission` in the `rhtap-releng-tenant` namespace and launches the `rh-push-to-external-registry` managed pipeline.
+11. The managed pipeline's `apply-mapping` task pushes the image to Quay with service-prefixed tags.
+12. If the gate passed, a Slack notification is sent with the pass verdict, per-job results, and links to the PipelineRun.
+13. If the gate failed (or the pipeline crashed before reaching evaluation), the `notify-slack` or `notify-slack-error` finally task queries the KubeArchive REST API to fetch historical PipelineRun data for the current ITS. The ITS name is used as a label selector, so each managed service's history is tracked independently with zero configuration.
+14. The pipeline checks whether consecutive recent failures form a streak meeting or exceeding the configurable `stale-threshold-days` parameter.
+15. If the gate failed, a standard failure notification is sent (15a). If the streak meets the threshold, a stale promotion alert is sent to Slack with the failure history and links to each PipelineRun (15b).
+
+## RBAC and Service Accounts
+
+Two ServiceAccounts are involved in the release gating flow:
+
+| ServiceAccount | Used By | Purpose |
+|----------------|---------|---------|
+| `nightly-promotion-sa` | CronJob, `create-release` task | Resolves and labels Snapshots, creates Release CRs |
+| `konflux-integration-runner` | Integration Service | Evaluates ITS, creates PipelineRuns |
+
+```mermaid
+flowchart LR
+    subgraph ServiceAccounts
+        SA1[nightly-promotion-sa]
+        SA2[konflux-integration-runner]
+    end
+
+    subgraph ClusterRoles
+        CR1[konflux-tester-internalbot-actions<br/>Snapshot: get, watch, list, update, patch]
+        CR2[konflux-releaser-bot-actions<br/>Release: create]
+    end
+
+    subgraph RoleBindings
+        RB1[nightly-promotion-sa-snapshot-labeler-binding]
+        RB2[nightly-promotion-sa-releaser-binding]
+    end
+
+    subgraph Secrets
+        S1[gangway-token]
+        S2[slack-webhook]
+    end
+
+    SA1 --> RB1 --> CR1
+    SA1 --> RB2 --> CR2
+    SA1 -.->|mounted in tasks| S1
+    SA1 -.->|mounted in tasks| S2
+    SA2 -.->|managed by Konflux| CR1
+```
+
+Key RBAC details:
+
+- `nightly-promotion-sa` is used by the CronJob (to label Snapshots) and by the `create-release` task (to create Release CRs). The `create-release` task runs as this SA via a `taskRunSpecs` override in the PipelineRun template:
+
+    ```yaml
+    taskRunSpecs:
+      - pipelineTaskName: create-release
+        serviceAccountName: nightly-promotion-sa
+    ```
+
+- `konflux-integration-runner` is the default SA for all PipelineRun tasks. The Integration Service forces this SA on every integration test PipelineRun (KONFLUX-5207). It has no extra bindings beyond what Konflux manages internally. The `taskRunSpecs` override above is what allows `create-release` to run as a different SA.
+- `nightly-promotion-sa-snapshot-labeler-binding` binds the SA to `konflux-tester-internalbot-actions` (Snapshot: get, watch, list, update, patch). This ClusterRole was created by the Konflux infra team (infra-deployments#12810).
+- `nightly-promotion-sa-releaser-binding` binds the SA to `konflux-releaser-bot-actions` (Release and Snapshot: list, get, watch, create).
+- Secrets (`gangway-token`, `slack-webhook`) are managed manually, not via GitOps.
+
+## Tekton Pipeline Internals
+
+### Design Rationale
+
+The pipeline uses Python modules instead of inline bash scripts. This choice was driven by:
+
+- **Readability**: structured Python functions with clear inputs/outputs vs multi-hundred-line shell scripts with embedded `jq` and `curl` chains
+- **Reusability**: shared modules (`http_utils`, `prow_utils`, `slack_utils`) are used across multiple service gates without duplication
+- **Testability**: individual functions can be unit-tested outside of the pipeline context
+- **stdlib-only**: all modules use only the Python standard library (no `pip install`, no external dependencies). This is a hard constraint: tasks run on the Konflux-provided `appstudio-utils` container image, which we do not control and cannot install packages on
+
+### Task Dependency Graph
+
+```mermaid
+flowchart LR
+    CL[clone-lib] --> EI[extract-image] --> RE[run-e2e] --> EV[evaluate-results] --> CR[create-release]
+    CR -.-> NS[notify-slack]
+    CR -.-> NSE[notify-slack-error]
+    NS -.-> KA[KubeArchive]
+    NSE -.-> KA
+
+    style NS stroke-dasharray: 5 5
+    style NSE stroke-dasharray: 5 5
+    style KA stroke-dasharray: 5 5
+```
+
+`notify-slack` and `notify-slack-error` are `finally` tasks that are mutually exclusive. Tekton skips a finally task whose parameter bindings reference results from a task that was skipped (unresolved results). `notify-slack` binds parameters to results of `create-release`, `evaluate-results`, and `extract-image`, so it fires only when all of them ran. `notify-slack-error` uses a `when` clause (`create-release.status == None`) and fires when `create-release` was skipped or never reached (either because the gate failed and `create-release` exited non-zero, or because an earlier DAG task crashed before reaching it). Both finally tasks query KubeArchive for historical PipelineRun data and check for stale promotion streaks.
+
+The per-job results JSON produced by `run-e2e` is written to a file on the shared workspace (`results.json`) rather than to a Tekton task result. This is a deliberate choice: Tekton task results have a hard 4 KB size limit, which can be exceeded when the pipeline runs many blocking and informing jobs, each carrying a full Prow URL. Both `evaluate-results` and `notify-slack` read the results directly from the workspace file.
+
+### Python Module Dependency Graph
+
+```mermaid
+flowchart BT
+    HU[http_utils] --> PU[prow_utils]
+    HU --> SU[slack_utils]
+    HU --> KU[kubearchive_utils]
+    PU --> HO[ho_release_gate]
+    SU --> HO
+    KU --> HO
+```
+
+| Module | Reusable | Functions |
+|--------|----------|-----------|
+| `http_utils` | Yes | `http_request`, `http_request_with_retry` |
+| `prow_utils` | Yes | `trigger_prow_job`, `resolve_prow_url`, `get_prow_job_status`, `short_name` |
+| `slack_utils` | Yes | `send_slack_message`, `build_slack_payload`, `mrkdwn_section`, `fields_section`, `divider` |
+| `kubearchive_utils` | Yes | `fetch_pipelineruns`, `build_pipelinerun_url` |
+| `ho_release_gate` | Per-service | `extract_component_image`, `trigger_all_jobs`, `resolve_all_urls`, `poll_until_complete`, `print_run_summary`, `build_results_json`, `evaluate_gate`, `build_gate_notification`, `build_error_notification`, `check_failure_streak`, `build_stale_notification`, `check_and_build_stale_payload` |
+
+The four reusable modules are service-agnostic. When extending to a new managed service, only `ho_release_gate` would need a service-specific counterpart (or the existing one can be reused if the gate logic is identical).
+
+### Workspace and Library Delivery
+
+The pipeline uses a PersistentVolumeClaim (PVC) workspace to deliver the Python modules to all tasks:
+
+1. The `clone-lib` task performs a **sparse git clone** of the repository, checking out only `.tekton/lib/`
+2. Library files are copied to the shared workspace root
+3. Each subsequent task adds the workspace path to `sys.path` and imports the modules directly
+
+This avoids embedding library code in the pipeline YAML and allows updating the modules independently of the pipeline definition.
+
+### Task Container Images
+
+All pipeline task steps use the `appstudio-utils` container image provided by Konflux. Container image references in the pipeline YAML must follow the **tag+digest** pinning convention:
+
+```text
+quay.io/konflux-ci/appstudio-utils:latest@sha256:<digest>
+```
+
+This format satisfies two requirements:
+
+- The **digest** ensures reproducible builds: the exact image layer set is locked regardless of tag mutations
+- The **tag** enables MintMaker (a Renovate-based service managed by the Konflux team) to detect when the tag points to a new digest and automatically open a pull request to bump it
+
+MintMaker scans all YAML files under `.tekton/` on a weekly schedule (Saturdays at 05:00 UTC). When it detects that the `latest` tag now resolves to a different digest, it opens a PR updating the `@sha256:...` suffix in every matching image reference. The pipeline maintainers only need to review and merge the PR.
+
+**Initial pinning is manual.** MintMaker will not convert a bare `:latest` tag to `tag+digest` format on its own. When adding a new task step or changing its base image, the author must look up the current digest (e.g. via the Quay API or `docker manifest inspect`) and write the full `tag@sha256:...` reference in the first commit. MintMaker takes over from that point forward.
+
+## Integration Points and Secrets
+
+| Integration | Protocol | Secret |
+|-------------|----------|--------|
+| **Integration Service** | Kubernetes label watch | None (cluster-internal) |
+| **Gangway (Prow CI)** | HTTPS REST API | `gangway-token` (Bearer token) |
+| **KubeArchive** | HTTPS REST API | SA projected token (cluster-internal) |
+| **Slack** | HTTPS webhook | `slack-webhook` (webhook URL) |
+| **Release Service** | Kubernetes CR creation | None (RBAC-based via `nightly-promotion-sa`) |
+
+### Integration Service and Pipeline Resolution
+
+The Integration Service watches for labeled Snapshots on the Konflux cluster. When the CronJob labels a Snapshot with `test.appstudio.openshift.io/scenario=<ITS_NAME>`, the Integration Service matches it to the corresponding IntegrationTestScenario and creates a PipelineRun with the ITS-defined parameters.
+
+The ITS has `contexts: disabled`, meaning it only triggers from explicit CronJob labels, not from every new Snapshot.
+
+The pipeline code is resolved at runtime through a two-step git resolver chain:
+
+```mermaid
+flowchart LR
+    ITS[IntegrationTestScenario] -->|"resolverRef (git)"| PRT[PipelineRun template<br/>ho-release-gate-run.yaml]
+    PRT -->|"pipelineRef (git resolver)"| P[Pipeline<br/>ho-release-gate.yaml]
+    P -->|"Gangway REST API"| Prow[Prow CI]
+
+    style ITS fill:#BBDEFB
+    style PRT fill:#E3F2FD
+    style P fill:#E3F2FD
+    style Prow fill:#FAFAFA
+```
+
+1. The ITS `resolverRef` points to the `PipelineRun template` in the GitHub repository
+2. The PipelineRun template's `pipelineRef` uses a git resolver to fetch the `Pipeline` definition
+3. Both are resolved and executed on the Konflux cluster (stone-prd-rh01), with no pipeline code stored on the cluster itself
+4. From within the pipeline, the `run-e2e` task calls out to the external Prow CI cluster via the Gangway REST API
+
+### Gangway (Prow CI)
+
+The `run-e2e` task uses the Gangway REST API to trigger Prow periodic jobs with custom environment overrides (HO image, test image). It then polls job status until all jobs complete or a 4-hour timeout is reached.
+
+#### Image Override Mechanism
+
+The candidate HO image is injected into the Prow job via `MULTISTAGE_PARAM_OVERRIDE_OVERRIDE_HYPERSHIFT_OPERATOR_IMAGE`. This is a Gangway transport variable: the `MULTISTAGE_PARAM_OVERRIDE_` prefix tells Gangway to pass the value as a multi-stage step parameter (`OVERRIDE_HYPERSHIFT_OPERATOR_IMAGE`) rather than as a ci-operator ImageStream override. The direct ImageStream mechanism (`OVERRIDE_IMAGE_HYPERSHIFT_OPERATOR`) cannot be used here because ci-operator resolves ImageStream overrides during the `base-images` phase, which may race with steps that consume the image before the override is applied. The transport variable bypasses this by injecting the value directly into the step's environment.
+
+The receiving step (`hypershift-install-commands.sh`) reads this parameter and uses it to install the HO from the candidate image.
+
+The test image (`hypershift-tests`) is overridden separately via `OVERRIDE_IMAGE_HYPERSHIFT_TESTS` using `:latest`. This is intentional: the test image is built by OpenShift CI, not by Konflux, so it is not part of the Snapshot and there is no straightforward way to extract a matching version.
+
+Timing parameters can be adjusted by modifying the corresponding constants in the `run-e2e` task script:
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| `TRIGGER_DELAY` | 60s | Delay between triggering consecutive jobs |
+| `RATE_LIMIT_BACKOFF` | 120s | Backoff on HTTP 429/5xx responses |
+| `MAX_RETRIES` | 3 | Retry attempts per trigger |
+| `INITIAL_DELAY` | 2700s (45 min) | Wait before first poll (let jobs start) |
+| `POLL_INTERVAL` | 600s (10 min) | Time between poll cycles |
+| `POLL_STAGGER` | 30s | Delay between polling individual jobs |
+| `TIMEOUT` | 14400s (4h) | Maximum total polling time |
+
+The Gangway endpoint URL is exposed as a pipeline parameter (`gangway-url`) with the current production URL as default. This allows updating the endpoint without a code change if the CI cluster migrates (as happened in the `app.ci` to `build0x` migration).
+
+### KubeArchive
+
+Both `notify-slack` and `notify-slack-error` query the KubeArchive REST API to retrieve archived PipelineRun data for stale promotion detection. KubeArchive is a cluster-internal service on stone-prd-rh01 that archives Kubernetes resources after they are garbage-collected. The KubeArchive API URL is exposed as a pipeline parameter (`kubearchive-api-base`) with the current production URL as default, following the same rationale as `gangway-url`.
+
+The pipeline authenticates to KubeArchive using a projected ServiceAccount token (audience: `kubearchive`), which is automatically available to the PipelineRun's SA. No additional secrets or configuration are required.
+
+The query uses the ITS name as a label selector (`test.appstudio.openshift.io/scenario=<ITS_NAME>`), so each managed service's PipelineRun history is tracked independently. This means the stale check works automatically for every service gate with zero additional configuration beyond the optional `stale-threshold-days` parameter (see Stale Promotion Alerting).
+
+### Slack
+
+Both `notify-slack` and `notify-slack-error` send Block Kit payloads to a Slack webhook. Notifications are currently posted to `#forum-ocp-hypershift`. The target channel is determined by the webhook URL stored in the `slack-webhook` Secret in `crt-redhat-acm-tenant`.
+
+When the gate passes, a success notification is sent. When the gate fails, both finally tasks query KubeArchive to check for a failure streak. If the streak meets or exceeds `stale-threshold-days`, a stale promotion alert is sent instead of the standard failure notification. The stale alert includes the failure streak duration, a history of recent PipelineRuns with links and failure reasons, and the configurable threshold. If there is no streak or it is below the threshold, a standard failure notification is sent. See Stale Promotion Alerting for the rationale.
+
+### Release Service
+
+When the gate passes, the `create-release` task creates a Release CR referencing the validated Snapshot and the `ReleasePlan`. The Release Service matches this to a `ReleasePlanAdmission` (RPA) in the `rhtap-releng-tenant` namespace and launches the `rh-push-to-external-registry` managed pipeline. The managed pipeline's `apply-mapping` task pushes the image to Quay with service-prefixed tags. The tag mapping is defined in the RPA, so each service has its own set of tags. For example, the ARO HCP RPA produces:
+
+- `aro-hcp-latest`
+- `aro-hcp-latest-{{ timestamp }}`
+- `aro-hcp-{{ git_sha }}`
+- `aro-hcp-{{ git_short_sha }}`
+
+
+---
+
+## Source: docs/content/reference/ho-release-gating/extending-services.md
+
+# Extending to Other Managed Services
+
+## Common and Reusable Components
+
+The following components are shared across all managed service gates and do not need to be duplicated:
+
+| Component | Location | Notes |
+|-----------|----------|-------|
+| Pipeline YAML | `.tekton/pipelines/ho-release-gate.yaml` | Fully parameterized, service-agnostic |
+| PipelineRun template | `.tekton/pipelines/ho-release-gate-run.yaml` | Referenced by all ITS resources via git resolver |
+| Python modules | `.tekton/lib/` | `http_utils`, `prow_utils`, `slack_utils`, `kubearchive_utils`, `ho_release_gate` |
+| CronJob | `nightly-promotion/cronjob.yaml` | Single CronJob triggers all service gates via `ITS_NAMES` env var; update it to add a new service |
+| Gangway token | `gangway-token` Secret | Shared across all service gates |
+| Slack webhook | `slack-webhook` Secret | Shared across all service gates |
+
+The pipeline accepts all service-specific values as parameters (gate label, test job lists, release plan name), which are injected by the IntegrationTestScenario at runtime.
+
+## Konflux Release Data
+
+!!! note
+    Links to `gitlab.cee.redhat.com` require Red Hat VPN and access to the repository. See Prerequisites.
+
+The Konflux Release Data repository on GitLab CEE contains the tenant configuration that defines how releases are processed. For each managed service gate, the following manifests must be created:
+
+- **IntegrationTestScenario (ITS)**: defines which pipeline to run and with which parameters
+- **ReleasePlan**: created in the tenant namespace, references the application and target
+- **ReleasePlanAdmission**: created in the releng namespace, authorizes the release and configures the managed pipeline
+
+Some manifests are auto-generated from tenant config. After editing, regenerate them with `cd tenants-config && ./build-single.sh <tenant>` and include the regenerated output in the same MR.
+
+## What Needs to Be Created for a New Service
+
+All resources below are added to the Konflux Release Data repository. The ITS and ReleasePlan are added as new entries in existing YAML files, while the RPA requires its own file in a separate directory (see section 3). Follow the naming convention `hypershift-ho-release-gate-<service>` (or `hypershift-operator-ho-release-gate-<service>` for ReleasePlan) to stay consistent with existing resources.
+
+### 1. IntegrationTestScenario (ITS)
+
+Add a new ITS resource to the existing `its.yaml`. The new resource follows the same structure, changing only the service-specific fields:
+
+```yaml
+---
+apiVersion: appstudio.redhat.com/v1beta2
+kind: IntegrationTestScenario
+metadata:
+  name: hypershift-ho-release-gate-<service>       # unique per service
+spec:
+  application: hypershift-operator
+  contexts:
+    - description: Only run via nightly CronJob trigger
+      name: disabled
+  params:
+    - name: e2e-blocking-job-names                  # service-specific Prow jobs
+      value: '["periodic-ci-openshift-hypershift-release-4.NN-periodics-e2e-<service-job>"]'
+    - name: e2e-informing-job-names
+      value: '[]'
+    - name: gate-label                              # shown in Slack notifications
+      value: "<SERVICE NAME>"
+    - name: release-plan-name                       # must match the ReleasePlan name
+      value: "hypershift-operator-ho-release-gate-<service>"
+    - name: stale-threshold-days                    # consecutive failure days before stale alert (default: 3)
+      value: "3"
+  resolverRef:                                      # same for all services
+    params:
+      - name: url
+        value: https://github.com/openshift/hypershift
+      - name: revision
+        value: main
+      - name: pathInRepo
+        value: .tekton/pipelines/ho-release-gate-run.yaml
+    resolver: git
+    resourceKind: pipelinerun
+```
+
+Fields to customize per service: `metadata.name`, `e2e-blocking-job-names`, `e2e-informing-job-names`, `gate-label`, `release-plan-name`. The `resolverRef` block is identical for all services.
+
+- `stale-threshold-days` (optional, default `3`): number of consecutive days of gate failures before a stale promotion alert is sent to Slack. Each managed service can set its own threshold based on how quickly a stale image becomes a concern. The stale check runs automatically using the ITS name as a label selector, so no additional configuration is needed. See Stale Promotion Alerting for details.
+
+### 2. ReleasePlan
+
+Add a new ReleasePlan resource to the existing `releaseplan.yaml`. This resource lives in the `crt-redhat-acm-tenant` namespace and links the application to the releng tenant:
+
+```yaml
+---
+apiVersion: appstudio.redhat.com/v1alpha1
+kind: ReleasePlan
+metadata:
+  labels:
+    release.appstudio.openshift.io/auto-release: "false"
+    release.appstudio.openshift.io/releasePlanAdmission: redhat-hypershift-operator-ho-release-gate-<service>  # <- customize
+    release.appstudio.openshift.io/standing-attribution: "true"
+  name: hypershift-operator-ho-release-gate-<service>  # <- customize
+spec:
+  application: hypershift-operator
+  target: rhtap-releng-tenant
+```
+
+Fields to customize per service:
+
+- `metadata.name`: must match the `release-plan-name` param in the ITS
+- `releasePlanAdmission` label: must match the RPA name (see below)
+
+The remaining fields are the same for all services:
+
+- `auto-release: "false"`: releases are created explicitly by the pipeline, not automatically on every Snapshot
+- `standing-attribution: "true"`: allows the Release CR to be created by an attributed SA (`nightly-promotion-sa`)
+
+### 3. ReleasePlanAdmission (RPA)
+
+The RPA lives in a separate directory under the releng namespace configuration. This resource is managed by the releng team but the HyperShift team provides the content. Create a new file named `redhat-hypershift-operator-ho-release-gate-<service>.yaml` following the existing ARO HCP example:
+
+```yaml
+---
+apiVersion: appstudio.redhat.com/v1alpha1
+kind: ReleasePlanAdmission
+metadata:
+  labels:
+    release.appstudio.openshift.io/block-releases: "false"
+    pp.engineering.redhat.com/business-unit: hybrid-cloud-experience
+  name: redhat-hypershift-operator-ho-release-gate-<service>  # <- customize
+  namespace: rhtap-releng-tenant
+spec:
+  applications:
+    - hypershift-operator
+  origin: crt-redhat-acm-tenant
+  policy: app-interface-standard
+  data:
+    mapping:
+      components:
+        - name: hypershift-operator-main
+          repositories:
+            - url: "quay.io/redhat-services-prod/crt-redhat-acm-tenant/hypershift/hypershift-operator-verified"
+      defaults:
+        tags:                                       # <- customize: service-specific tag prefixes
+          - "<service>-latest"
+          - "<service>-latest-{{ timestamp }}"
+          - "<service>-{{ git_sha }}"
+          - "<service>-{{ git_short_sha }}"
+        pushSourceContainer: false
+    releaseNotes:
+      product_name: ACM Prod Index
+      product_version: "0.1"
+    intention: production
+  pipeline:
+    pipelineRef:
+      resolver: git
+      params:
+        - name: url
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
+        - name: revision
+          value: production
+        - name: pathInRepo
+          value: "pipelines/managed/rh-push-to-external-registry/rh-push-to-external-registry.yaml"
+    serviceAccountName: release-app-interface-prod
+    timeouts:
+      pipeline: "4h0m0s"
+      tasks: "4h0m0s"
+```
+
+Key fields to customize per service:
+
+- `metadata.name`: follows the convention `redhat-hypershift-operator-ho-release-gate-<service>`
+- `data.mapping.defaults.tags`: tag prefixes specific to the service (e.g. `aro-hcp-`, `rosa-`)
+- `data.mapping.components[].repositories[].url`: can point to a different Quay repo if needed. If the repository does not exist, it will be auto-created on the first successful run
+- The `pipeline` block is typically the same for all services (same managed pipeline)
+
+### 4. Register in the CronJob
+
+The CronJob is a shared component (see table above). To enable the new service gate, add the new ITS name to the `ITS_NAMES` environment variable in the existing `cronjob.yaml`:
+
+```yaml
+env:
+  - name: ITS_NAMES
+    value: "hypershift-ho-release-gate-aro-hcp,hypershift-ho-release-gate-<service>"
+```
+
+The value is a plain comma-separated string (no brackets, no quotes around individual names, no spaces). The CronJob iterates over the list and labels the Snapshot for each ITS sequentially.
+
+## Step-by-Step: From Zero to First Gated Release
+
+1. Identify the Prow periodic jobs for the new service
+2. Create a single MR on the Konflux Release Data repository containing:
+    - The new ITS resource (added to `its.yaml`)
+    - The new ReleasePlan (added to `releaseplan.yaml`)
+    - The new ReleasePlanAdmission (new file under the RPA directory)
+    - The CronJob update (new ITS name in `ITS_NAMES`)
+    - Regenerated manifests (`cd tenants-config && ./build-single.sh <tenant>`)
+3. If releng approval is required (e.g. for the RPA), the MR can be advertised in #konflux-users
+4. After merge, wait for the next nightly run or trigger manually (see Operations and Troubleshooting)
+5. Verify the Slack notification shows the new service gate results
+
+
+---
+
+## Source: docs/content/reference/ho-release-gating/extending-tests.md
+
+# Adding or Modifying E2E Tests
+
+This page describes how to add, remove, or reclassify E2E tests for a specific managed service gate. Each managed service has its own IntegrationTestScenario (ITS) with independent test lists, so changes to one service gate do not affect the others.
+
+## Where the Job Lists Live
+
+The E2E test lists are defined as parameters in the ITS resource. Each ITS specifies two JSON arrays:
+
+- `e2e-blocking-job-names`: tests that must pass for the gate to succeed
+- `e2e-informing-job-names`: tests that are reported but do not block promotion
+
+These parameters are injected into the pipeline at runtime by the Integration Service.
+
+!!! note
+    Links to `gitlab.cee.redhat.com` require Red Hat VPN and access to the repository. See Prerequisites.
+
+The ITS resources are managed via GitOps in the Konflux Release Data repository on GitLab CEE, under:
+
+```
+tenants-config/cluster/stone-prd-rh01/tenants/crt-redhat-acm-tenant/
+  hypershift-operator/nightly-promotion/its.yaml
+```
+
+Each managed service has its own ITS resource in this file, following a consistent naming convention (`hypershift-ho-release-gate-<service>`).
+
+### ITS Structure
+
+The ITS file contains one resource per managed service. Each ITS references the same pipeline but with different parameters:
+
+```yaml
+apiVersion: appstudio.redhat.com/v1beta2
+kind: IntegrationTestScenario
+metadata:
+  name: hypershift-ho-release-gate-aro-hcp       # per-service name
+  namespace: crt-redhat-acm-tenant
+spec:
+  application: hypershift-operator
+  contexts:
+    - name: disabled                              # CronJob-triggered only
+  resolverRef:
+    resolver: git
+    params:
+      - name: url
+        value: https://github.com/openshift/hypershift.git
+      - name: revision
+        value: main
+      - name: pathInRepo
+        value: .tekton/pipelines/ho-release-gate-run.yaml
+  params:
+    - name: e2e-blocking-job-names                # <-- edit these lists
+      value: '["periodic-ci-...-e2e-aks",
+               "periodic-ci-...-e2e-aks-upgrade-minor"]'
+    - name: e2e-informing-job-names
+      value: '["periodic-ci-...-e2e-aks-ovn-conformance"]'
+    - name: gate-label
+      value: "ARO HCP"
+    - name: release-plan-name
+      value: "hypershift-operator-ho-release-gate-aro-hcp"
+    - name: stale-threshold-days                    # <-- optional, default 3
+      value: "3"
+```
+
+- `stale-threshold-days` controls how many consecutive days of gate failures must occur before a stale promotion alert is sent. The default is `3`. Adjust per service if needed (e.g. a critical service may use `2`, while a less critical one may tolerate `5`). See Stale Promotion Alerting.
+
+When a new managed service is added, a second ITS resource with the same structure is appended to this file, with its own service-specific job lists, gate label, release plan name, and stale threshold.
+
+## Adding a New Job
+
+To add a new Prow periodic job to a service gate:
+
+1. Ensure the job exists as a Prow periodic in the openshift/release repository
+2. Decide whether the job should be **blocking** or **informing**
+3. Edit the ITS resource for the target service and add the full job name to the appropriate JSON array parameter
+
+## Moving a Job Between Categories
+
+To promote a job from informing to blocking (or demote from blocking to informing):
+
+1. Remove the job name from the source array
+2. Add it to the target array
+3. Submit the change as an MR to the Konflux Release Data repository
+
+## Job Naming Convention
+
+The pipeline expects full Prow periodic job names following the standard OpenShift CI naming convention:
+
+```
+periodic-ci-<org>-<repo>-<branch>-<variant>-<test-name>
+```
+
+For example:
+
+```
+periodic-ci-openshift-hypershift-release-4.19-periodics-e2e-aks
+```
+
+The pipeline automatically strips the common prefix (`periodic-ci-openshift-hypershift-release-4.NN-periodics-`) when displaying results in logs and Slack notifications for readability.
+
+## Verifying the Change
+
+After modifying the test lists:
+
+1. Submit the MR to the Konflux Release Data repository
+2. Wait for the next nightly run, or trigger a manual run (see Operations and Troubleshooting)
+3. Check the Slack notification to verify the new job appears in the results
+4. Inspect the PipelineRun logs to confirm the job was triggered and polled correctly
+
+
+---
+
+## Source: docs/content/reference/ho-release-gating/index.md
+
+# HyperShift Operator Konflux Release Gating
+
+The HyperShift Operator (HO) uses a Konflux-based release gating pipeline to validate nightly builds before promoting them to downstream consumers. A nightly CronJob selects the latest Snapshot, triggers Prow-hosted E2E tests against it, and only promotes the image when all blocking tests pass.
+
+## Prerequisites
+
+The following access is required to operate on the HO release gate pipeline:
+
+- **Access to the stone-prd-rh01 cluster** (login via OpenShift console > username > "Copy login command")
+- **Contributor access to the `crt-redhat-acm-tenant` namespace** (RoleBinding required to operate on pipeline resources)
+- **Access to the `konflux-release-data` GitLab repo** (required for opening MRs to modify ITS, RBAC, ReleasePlan, etc.)
+
+If any of these are missing, request them in #forum-ocp-hypershift specifying what you need and why.
+
+Additionally:
+
+- **`oc` CLI** installed
+- **Red Hat VPN** active (required for `gitlab.cee.redhat.com` links)
+- **`jq`** installed (for troubleshooting commands only)
+
+## How It Works
+
+Every night, a CronJob triggers a new HO build in Konflux. Once the build completes and a Snapshot is created, the Integration Service evaluates an IntegrationTestScenario (ITS) that launches the release gating pipeline. The pipeline:
+
+1. Extracts the HO container image from the Snapshot
+2. Triggers blocking and informing E2E tests via Gangway (Prow CI)
+3. Evaluates the test results against the gate criteria
+4. Creates a Release CR if the gate passes, which triggers image promotion
+5. Sends a Slack notification with the outcome
+6. Checks for stale promotion (consecutive days of gate failures) and sends a dedicated alert if the threshold is exceeded
+
+## Documentation Pages
+
+| Page | Description |
+|------|-------------|
+| Release Strategy | Why release gating exists, blocking vs informing tests, gate verdict logic, stale promotion alerting |
+| Architecture | End-to-end flow, RBAC, Tekton pipeline internals, integration points |
+| Adding E2E Tests | How to add, remove, or reclassify E2E tests in the gate |
+| Extending to Other Services | How to set up release gating for a new managed service |
+| Operations and Troubleshooting | Manual triggers, inspecting runs, common failure scenarios |
+
+
+---
+
+## Source: docs/content/reference/ho-release-gating/strategy.md
+
+# Release Strategy and Rationale
+
+## Why Release Gating Exists
+
+The HyperShift Operator is a core component for multiple managed OpenShift services (ARO HCP, ROSA, GCP). A broken operator image reaching production can cause widespread cluster provisioning and management failures.
+
+Release gating adds a validation step between the Konflux build and the downstream promotion: every nightly Snapshot must pass a defined set of E2E tests before the image is promoted to the staging registry. This ensures that only validated images reach managed service environments.
+
+<!-- TODO: add OCPSTRAT link when available -->
+
+## Blocking vs Informing Tests
+
+The pipeline supports two categories of E2E tests:
+
+| Category | Semantics | Effect on Gate |
+|----------|-----------|----------------|
+| **Blocking** | Must pass for promotion | Gate fails if any blocking test fails |
+| **Informing** | Advisory, monitored for trends | Reported in Slack but does not block promotion |
+
+This distinction allows the team to monitor new or experimental tests without risking promotion stability. A test typically starts as informing and graduates to blocking once it has proven stable.
+
+## Gate Verdict Logic
+
+The gate evaluates results as follows:
+
+- **Pass**: all blocking tests passed (informing results are reported but ignored for the verdict)
+- **Fail**: one or more blocking tests failed
+
+## What Happens When the Gate Passes
+
+1. The pipeline creates a **Release CR** referencing the validated Snapshot and the corresponding ReleasePlan
+2. The Konflux **Release Service** picks up the Release CR and triggers a **managed pipeline**
+3. The managed pipeline promotes the HO image to the Quay staging repository
+4. A **Slack notification** is sent with the pass verdict, test results summary, and links to the PipelineRun
+
+## What Happens When the Gate Fails
+
+1. **No Release CR** is created, so no promotion occurs
+2. The `create-release` task exits with a non-zero code, marking the PipelineRun as failed
+3. A **Slack notification** is sent with the failure verdict, identifying which blocking tests failed and including Prow job links for investigation
+
+## Stale Promotion Alerting
+
+A single nightly gate failure is normal and gets fixed quickly. However, if the gate keeps failing for multiple consecutive days, the last successfully promoted image becomes increasingly stale. This can go unnoticed because each individual failure notification looks the same as any other.
+
+Stale promotion alerting solves this by tracking the history of PipelineRun outcomes per managed service and sending a dedicated alert when the number of consecutive failure days reaches a configurable threshold.
+
+### How It Works
+
+When the gate fails, both `notify-slack` and `notify-slack-error` perform the following steps before sending the failure notification:
+
+1. Query the KubeArchive REST API for archived PipelineRuns matching the current ITS label selector
+2. Walk the history from most recent to oldest, counting consecutive failures (a "failure streak")
+3. If the streak spans a number of days equal to or greater than the `stale-threshold-days` parameter, send a stale promotion alert instead of the standard failure notification
+
+The stale alert replaces the normal failure notification. It includes the streak duration in days, a list of recent failed PipelineRuns with dates, failure reasons, and links, and the current threshold value. If there is no streak or the streak is below the threshold, a standard failure notification is sent.
+
+### Per-Service Independence
+
+The stale check is performed independently for each managed service. The pipeline uses the ITS name as a Kubernetes label selector when querying KubeArchive, so each service's PipelineRun history is isolated. This means:
+
+- ARO HCP and ROSA (or any future service) each have their own failure streak, tracked automatically
+- A failure streak in one service does not affect or trigger alerts for another
+- No additional configuration is needed beyond adding the `stale-threshold-days` parameter to the ITS
+
+### Configuration
+
+The stale threshold is configured per service via the `stale-threshold-days` parameter in the IntegrationTestScenario. The default value is `3` (alert after 3 consecutive days of failures). Each service can set its own threshold based on its tolerance for stale images.
+
+See Adding or Modifying E2E Tests and Extending to Other Services for how to configure this parameter in the ITS.
+
+
+---
+
+## Source: docs/content/reference/ho-release-gating/troubleshooting.md
+
+# Operations and Troubleshooting
+
+## Manual Trigger Strategies
+
+There are two ways to manually trigger the release gating pipeline, each with different scope.
+
+### Full CronJob Run (All Service Gates)
+
+This re-runs the entire nightly flow, triggering all managed service gates defined in `ITS_NAMES`:
+
+```bash
+oc create job --from=cronjob/hypershift-operator-nightly-promotion \
+  ho-release-gate-manual-$(date +%s) -n crt-redhat-acm-tenant
+```
+
+Use this when you need to re-validate all services (e.g. after a shared infrastructure fix).
+
+### Snapshot Label (Single Service Gate)
+
+This triggers only one specific ITS, useful for re-testing a single service without affecting others:
+
+```bash
+SNAPSHOT_NAME=$(oc get snapshot -n crt-redhat-acm-tenant \
+  --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+
+oc label snapshot "$SNAPSHOT_NAME" \
+  test.appstudio.openshift.io/scenario=<its-name> \
+  -n crt-redhat-acm-tenant --overwrite
+```
+
+Replace `<its-name>` with the target ITS name, for example `hypershift-ho-release-gate-aro-hcp`. The Integration Service will detect the label and create a new PipelineRun for that ITS only.
+
+### When to Use Which
+
+| Scenario | Strategy |
+|----------|----------|
+| Re-validate all services after an infrastructure change | CronJob |
+| Re-test a single service after fixing a service-specific issue | Snapshot label |
+| Test a new ITS configuration | Snapshot label |
+| Nightly run failed due to a transient error | Snapshot label (for the affected gate) |
+
+## Inspecting a PipelineRun
+
+### Fetching the PipelineRun
+
+List recent release gating PipelineRuns:
+
+```bash
+oc get pipelineruns -n crt-redhat-acm-tenant \
+  --sort-by=.metadata.creationTimestamp | tail -5
+```
+
+### Reading Task Logs
+
+Find the pods for a specific PipelineRun, then read the logs for a specific task step:
+
+```bash
+oc get pods -n crt-redhat-acm-tenant -l tekton.dev/pipelineRun=<pipelinerun-name>
+
+oc logs pod/<pod-name> -c step-<step-name> -n crt-redhat-acm-tenant
+```
+
+!!! warning
+
+    PipelineRun pods are subject to aggressive garbage collection on the Konflux cluster. If the pods have already been deleted, use the Konflux UI instead (see below), where logs are persisted, centralized, and aggregated across all tasks of the pipeline.
+
+### Konflux UI
+
+PipelineRun logs and Release CR status are available in the Konflux PipelineRuns view.
+
+!!! tip
+
+    Use the PipelineRun name from the `oc get pipelineruns` command above to filter the list in the UI.
+
+### Historical PipelineRun Data (KubeArchive)
+
+The `oc get pipelineruns` command only returns PipelineRuns that still exist on the cluster. Due to aggressive garbage collection on stone-prd-rh01, PipelineRuns are deleted shortly after completion. For historical data (e.g. investigating a stale promotion streak or reviewing failures beyond what the Slack notification displays), query the KubeArchive REST API directly:
+
+```bash
+curl -s -H "Authorization: Bearer $(oc whoami -t)" \
+  "https://kubearchive-api-server-product-kubearchive.apps.stone-prd-rh01.pg1f.p1.openshiftapps.com/apis/tekton.dev/v1/namespaces/crt-redhat-acm-tenant/pipelineruns?labelSelector=test.appstudio.openshift.io/scenario=<ITS_NAME>" \
+  | jq -r '.items[] | "\(.metadata.name)  status=\(.status.conditions[-1].status // "?")  reason=\(.status.conditions[-1].reason // "?")"'
+```
+
+!!! note
+
+    The KubeArchive URL in the curl command above corresponds to the default value of the `kubearchive-api-base` pipeline parameter. If the pipeline has been reconfigured to point at a different KubeArchive instance, use that URL instead.
+
+Replace `<ITS_NAME>` with the target service gate name (e.g. `hypershift-ho-release-gate-aro-hcp`). You must be logged in to the stone-prd-rh01 cluster (`oc login`).
+
+The output lists all archived PipelineRuns for that ITS with their completion status and reason. To inspect a specific PipelineRun from the results, build the Konflux UI URL from its name:
+
+```
+https://konflux-ui.apps.stone-prd-rh01.pg1f.p1.openshiftapps.com/ns/crt-redhat-acm-tenant/applications/hypershift-operator/pipelineruns/<pipelinerun-name>/
+```
+
+This URL provides the full task logs, results, and pipeline visualization even after the PipelineRun has been garbage-collected from the cluster.
+
+## Common Failure Scenarios
+
+### Gangway Token Expired
+
+**Symptom**: `run-e2e` task fails with HTTP 401 errors when triggering Prow jobs.
+
+**Fix**: rotate the `gangway-token` Secret in `crt-redhat-acm-tenant`. The token is a Prow CI cluster OAuth token.
+
+### Slack Webhook 4xx
+
+**Symptom**: `notify-slack` logs show repeated 4xx errors after 3 retries.
+
+**Fix**: verify the webhook URL in the `slack-webhook` Secret is still valid. Slack webhooks can be revoked if the app is reinstalled.
+
+### clone-lib Failure
+
+**Symptom**: `clone-lib` task fails with git errors.
+
+**Common causes**:
+
+- Repository URL or branch changed
+- GitHub rate limiting on unauthenticated git clones
+- Network connectivity from the Konflux cluster
+
+### PVC Issues
+
+**Symptom**: tasks fail with workspace mount errors or permission denied on shared files.
+
+**Common causes**:
+
+- PVC quota exceeded in the tenant namespace
+- Storage class unavailable
+- Stale PVCs from previous failed runs (Konflux garbage-collects these, but delays can occur)
+
+### Prow Job Timeout
+
+**Symptom**: `run-e2e` task reaches its 4-hour polling timeout with jobs still pending.
+
+**Common causes**:
+
+- Prow cluster capacity issues (jobs queued but not scheduled)
+- The E2E test itself is stuck or abnormally slow
+- Gangway API returning stale status
+
+**Mitigation**: check the Prow job directly in the Prow UI using the URL from the `run-e2e` task logs. If the job is stuck, it may need to be manually cancelled in Prow before re-triggering the gate.
+
+### KubeArchive Unreachable
+
+**Symptom**: `notify-slack` or `notify-slack-error` logs show warnings about failing to fetch PipelineRun history from KubeArchive. The gate result notification is still sent, but no stale promotion alert appears.
+
+**Common causes**:
+
+- KubeArchive service is down or restarting on stone-prd-rh01
+- The projected ServiceAccount token has expired or the audience (`kubearchive`) is misconfigured
+- Network policy changes blocking cluster-internal traffic
+
+**Impact**: the stale check is a non-blocking operation. If KubeArchive is unreachable, the pipeline logs a warning and skips the stale alert. The gate verdict and notification are not affected. The stale check will resume automatically on the next run when KubeArchive becomes available again.
+
+### Unexpected Stale Alert
+
+**Symptom**: a stale promotion alert is sent even though the gate has not been failing for long, or the streak count seems wrong.
+
+**Common causes**:
+
+- `stale-threshold-days` is set too low in the ITS (e.g. `1` would alert on the first failure)
+- Test PipelineRuns from integration testing contribute to the real streak history because they are archived with the same ITS label. The streak resets automatically on the first successful nightly run
+- KubeArchive returned incomplete data (e.g. after a data migration or cleanup)
+
+
+---
+
 ## Source: docs/content/reference/index.md
 
 ---
@@ -58168,6 +60999,10 @@ This section of the HyperShift documentation contains references.
 
 ## Source: docs/content/reference/infrastructure/agent.md
 
+---
+title: Agent
+---
+
 The agent platform does not create any infrastructure but does have two kinds of prerequisites:
 
 1. Agents: An Agent represents a host booted with a discovery image and ready to be provisioned as an OpenShift node. For more information, see here.
@@ -58179,6 +61014,10 @@ You can find more details about the prerequisites in the how-to.
 ---
 
 ## Source: docs/content/reference/infrastructure/aws.md
+
+---
+title: AWS
+---
 
 In this section we want to dissect who creates what and what not. It contains 4 stages:
 
@@ -59926,6 +62765,10 @@ services.
 
 ## Source: docs/content/reference/manifests/ibmcloud/4.10.md
 
+---
+title: "4.10"
+---
+
 **HostedCluster**
 
 ```yaml
@@ -60256,6 +63099,10 @@ spec:
 
 ## Source: docs/content/reference/manifests/ibmcloud/4.11.md
 
+---
+title: "4.11"
+---
+
 **HostedCluster**
 
 ```yaml
@@ -60575,6 +63422,10 @@ spec:
 
 ## Source: docs/content/reference/manifests/ibmcloud/4.12.md
 
+---
+title: "4.12"
+---
+
 **HostedCluster**
 
 ```yaml
@@ -60887,6 +63738,10 @@ spec:
 
 ## Source: docs/content/reference/manifests/ibmcloud/4.13.md
 
+---
+title: "4.13"
+---
+
 **HostedCluster**
 
 ```yaml
@@ -61194,6 +64049,10 @@ spec:
 ---
 
 ## Source: docs/content/reference/manifests/ibmcloud/4.9.md
+
+---
+title: "4.9"
+---
 
 **HostedCluster**
 

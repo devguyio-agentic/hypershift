@@ -147,6 +147,13 @@ var (
 		// until CVO catches up. This is a deterministic ordering issue, not a race.
 		// See https://issues.redhat.com/browse/OCPBUGS-78539
 		"dns-operator": 5,
+		// CVO and CNO may restart once during hosted cluster initialization due to
+		// dependency ordering and kube-apiserver availability timing.
+		// See https://issues.redhat.com/browse/OCPBUGS-109581
+		// See https://issues.redhat.com/browse/OCPBUGS-77042
+		// See https://issues.redhat.com/browse/OCPBUGS-18569
+		"cluster-version-operator": 1,
+		"cluster-network-operator": 1,
 	}
 )
 
@@ -833,11 +840,27 @@ func EnsureNoCrashingPods(t *testing.T, ctx context.Context, client crclient.Cli
 	})
 }
 
-func isLeaderElectionFailure(ctx context.Context, client *kubeclient.Clientset, pod *corev1.Pod, containerName string, t *testing.T) bool {
+var LeaderElectionFailurePatterns = []string{
+	"election lost",
+	"failed to renew lease",
+	"stopped leading",
+}
+
+func MatchesLeaderElectionFailure(line string) bool {
+	lower := strings.ToLower(line)
+	for _, pattern := range LeaderElectionFailurePatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLeaderElectionFailure(ctx context.Context, client kubeclient.Interface, pod *corev1.Pod, containerName string, t *testing.T) bool {
 	podLogOpts := corev1.PodLogOptions{
 		Container: containerName,
 		Previous:  true,
-		TailLines: ptr.To[int64](10),
+		TailLines: ptr.To[int64](100),
 	}
 	req := client.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &podLogOpts)
 	podLogs, err := req.Stream(ctx)
@@ -856,11 +879,12 @@ func isLeaderElectionFailure(ctx context.Context, client *kubeclient.Clientset, 
 	buf := make([]byte, bufSize)
 	scanner.Buffer(buf, maxScanTokenSize)
 	for scanner.Scan() {
-		if strings.Contains(strings.ToLower(scanner.Text()), "election lost") {
+		if MatchesLeaderElectionFailure(scanner.Text()) {
 			return true
 		}
 	}
 
+	_, _ = io.Copy(io.Discard, podLogs)
 	if err = scanner.Err(); err != nil {
 		t.Logf("failed to read pod log; pod namespace: %s, pod name: %s, error: %v", pod.Namespace, pod.Name, err)
 	}
@@ -3615,7 +3639,7 @@ func EnsureDefaultSecurityGroupTags(t *testing.T, ctx context.Context, client cr
 
 		// Update the hosted cluster to add a day2 tag
 		err = UpdateObject(t, ctx, client, hostedCluster, func(object *hyperv1.HostedCluster) {
-			object.Spec.Platform.AWS.ResourceTags = append(object.Spec.Platform.AWS.ResourceTags, hyperv1.AWSResourceTag{
+			object.Spec.Platform.AWS.ResourceTags = append(object.Spec.Platform.AWS.ResourceTags, hyperv1.AWSClusterResourceTag{
 				Key:   day2TagKey,
 				Value: day2TagValue,
 			})

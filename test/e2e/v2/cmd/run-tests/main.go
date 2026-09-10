@@ -11,16 +11,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/openshift/hypershift/test/e2e/v2/lifecycle"
 )
 
 const (
-	testBinary          = "bin/test-e2e-v2"
-	clusterNS           = "clusters"
-	defaultVerbose      = "false"
+	defaultTestBinary    = "bin/test-e2e-v2"
+	defaultVerbose       = "false"
 	defaultGinkgoTimeout = "3h"
 )
 
@@ -30,8 +28,17 @@ type testResult struct {
 	err  error
 }
 
+func resolveTestBinary() string {
+	if binDir := os.Getenv("E2EV2_BIN_DIR"); binDir != "" {
+		return filepath.Join(binDir, "test-e2e-v2")
+	}
+	return defaultTestBinary
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags)
+
+	testBinary := resolveTestBinary()
 
 	sharedDir := requireEnv("SHARED_DIR")
 	artifactDir := requireEnv("ARTIFACT_DIR")
@@ -43,6 +50,11 @@ func main() {
 	}
 	os.Setenv("EVENTUALLY_VERBOSE", eventuallyVerbose)
 
+	manifest, err := lifecycle.ReadManifest(sharedDir)
+	if err != nil {
+		log.Fatalf("Failed to read cluster manifest: %v", err)
+	}
+
 	platform, err := lifecycle.NewPlatformConfig(os.Getenv("HYPERSHIFT_PLATFORM"), sharedDir)
 	if err != nil {
 		log.Fatalf("Failed to initialize platform config: %v", err)
@@ -53,6 +65,11 @@ func main() {
 
 	matrix := platform.TestMatrix(releaseImage)
 
+	clustersByVariant, err := matrix.ResolveVariants(manifest)
+	if err != nil {
+		log.Fatalf("Manifest/test matrix mismatch: %v", err)
+	}
+
 	var (
 		mu      sync.Mutex
 		results []testResult
@@ -62,12 +79,12 @@ func main() {
 	// Launch parallel test groups.
 	for _, g := range matrix.Parallel {
 		g := g
+		entry := clustersByVariant[g.Variant]
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			clusterName := readClusterName(sharedDir, g.ClusterFile)
-			log.Printf("Running %s tests against %s...", g.Name, clusterName)
-			err := runTestBinary(clusterName, g.LabelFilter, g.Skip,
+			log.Printf("Running %s tests against %s...", g.Name, entry.Name)
+			err := runTestBinary(testBinary, entry.Name, entry.Namespace, g.LabelFilter, g.Skip,
 				filepath.Join(artifactDir, g.JUnitFile), g.ExtraEnv)
 			mu.Lock()
 			results = append(results, testResult{name: g.Name, err: err})
@@ -88,9 +105,9 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for i, step := range sg.Steps {
-				clusterName := readClusterName(sharedDir, step.ClusterFile)
-				log.Printf("Running %s tests against %s...", step.Name, clusterName)
-				err := runTestBinary(clusterName, step.LabelFilter, step.Skip,
+				entry := clustersByVariant[step.Variant]
+				log.Printf("Running %s tests against %s...", step.Name, entry.Name)
+				err := runTestBinary(testBinary, entry.Name, entry.Namespace, step.LabelFilter, step.Skip,
 					filepath.Join(artifactDir, step.JUnitFile), step.ExtraEnv)
 				mu.Lock()
 				results = append(results, testResult{name: step.Name, err: err})
@@ -126,7 +143,7 @@ func main() {
 	log.Println("All test groups passed")
 }
 
-func runTestBinary(clusterName, labelFilter, skip, junitPath string, extraEnv []string) error {
+func runTestBinary(testBinary, clusterName, namespace, labelFilter, skip, junitPath string, extraEnv []string) error {
 	ginkgoTimeout := os.Getenv("GINKGO_TIMEOUT")
 	if ginkgoTimeout == "" {
 		ginkgoTimeout = defaultGinkgoTimeout
@@ -148,24 +165,11 @@ func runTestBinary(clusterName, labelFilter, skip, junitPath string, extraEnv []
 
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("E2E_HOSTED_CLUSTER_NAME=%s", clusterName),
-		fmt.Sprintf("E2E_HOSTED_CLUSTER_NAMESPACE=%s", clusterNS),
+		fmt.Sprintf("E2E_HOSTED_CLUSTER_NAMESPACE=%s", namespace),
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 
 	return cmd.Run()
-}
-
-func readClusterName(sharedDir, filename string) string {
-	path := filepath.Join(sharedDir, filename)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		log.Fatalf("Failed to read cluster name from %s: %v", path, err)
-	}
-	name := strings.TrimSpace(string(data))
-	if name == "" {
-		log.Fatalf("Cluster name file %s is empty", path)
-	}
-	return name
 }
 
 func requireEnv(key string) string {

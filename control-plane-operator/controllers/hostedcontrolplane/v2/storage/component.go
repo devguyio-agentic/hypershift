@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	configoperatorv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/configoperator"
 	oapiv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/oapi"
 	"github.com/openshift/hypershift/support/azureutil"
 	component "github.com/openshift/hypershift/support/controlplane-component"
@@ -40,7 +41,13 @@ func (r *clusterStorageOperator) NeedsManagementKASAccess() bool {
 	return true
 }
 
-func NewComponent() component.ControlPlaneComponent {
+func NewComponent(hcp *hyperv1.HostedControlPlane) component.ControlPlaneComponent {
+	deps := []string{oapiv2.ComponentName}
+	if hcp.Spec.OperatorConfiguration != nil &&
+		hcp.Spec.OperatorConfiguration.CSIDriverConfig.AWS.KMSKeyARN != "" {
+		deps = append(deps, configoperatorv2.ComponentName)
+	}
+
 	return component.NewDeploymentComponent(ComponentName, &clusterStorageOperator{}).
 		WithAdaptFunction(adaptDeployment).
 		WithPredicate(isStorageAndCSIManaged).
@@ -64,7 +71,11 @@ func NewComponent() component.ControlPlaneComponent {
 			component.WithAdaptFunction(adaptAzureCSIFileSecretProvider),
 			component.WithPredicate(isAroHCP),
 		).
-		WithDependencies(oapiv2.ComponentName).
+		WithManifestAdapter(
+			"controller-config.yaml",
+			component.WithAdaptFunction(component.NewGenericControllerConfigAdapter("0.0.0.0:8443", "")),
+		).
+		WithDependencies(deps...).
 		InjectAvailabilityProberContainer(podspec.AvailabilityProberOpts{
 			KubeconfigVolumeName: "guest-kubeconfig",
 			RequiredAPIs: []schema.GroupVersionKind{
@@ -76,10 +87,7 @@ func NewComponent() component.ControlPlaneComponent {
 }
 
 func isStorageAndCSIManaged(cpContext component.WorkloadContext) (bool, error) {
-	if cpContext.HCP.Spec.Platform.Type == hyperv1.IBMCloudPlatform || cpContext.HCP.Spec.Platform.Type == hyperv1.PowerVSPlatform {
-		return false, nil
-	}
-	return true, nil
+	return component.IsStorageAndCSIManaged(cpContext.HCP.Spec.Platform.Type), nil
 }
 
 func isAroHCP(cpContext component.WorkloadContext) bool {

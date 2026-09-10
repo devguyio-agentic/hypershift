@@ -752,14 +752,7 @@ func (r *HostedClusterReconciler) reconcile(ctx context.Context, req ctrl.Reques
 			// So consumers e.g. UI can categorize as good (True) / bad (False).
 			if conditionType == hyperv1.ClusterVersionSucceeding {
 				hcCVOCondition.Type = string(hyperv1.ClusterVersionSucceeding)
-				var status metav1.ConditionStatus
-				switch hcpCVOConditions[conditionType].Status {
-				case metav1.ConditionTrue:
-					status = metav1.ConditionFalse
-				case metav1.ConditionFalse:
-					status = metav1.ConditionTrue
-				}
-				hcCVOCondition.Status = status
+				hcCVOCondition.Status = invertConditionStatus(hcpCVOConditions[conditionType].Status)
 			}
 		}
 
@@ -1115,7 +1108,7 @@ func (r *HostedClusterReconciler) reconcile(ctx context.Context, req ctrl.Reques
 				}
 			}
 			if err == nil && serviceFirstNodePortAvailable(ignitionService) {
-				hcluster.Status.IgnitionEndpoint = fmt.Sprintf("%s:%d", serviceStrategy.NodePort.Address, ignitionService.Spec.Ports[0].NodePort)
+				hcluster.Status.IgnitionEndpoint = net.JoinHostPort(serviceStrategy.NodePort.Address, strconv.Itoa(int(ignitionService.Spec.Ports[0].NodePort)))
 			}
 		default:
 			// We don't return the error here as reconciling won't solve the input problem.
@@ -2895,10 +2888,8 @@ func (r *HostedClusterReconciler) reconcileCAPIProvider(cpContext controlplaneco
 		},
 	}
 	err = cpContext.Client.Get(cpContext, client.ObjectKeyFromObject(capiProviderDeployment), capiProviderDeployment)
-	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to fetch capi provider deployment: %w", err)
-		}
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to fetch capi provider deployment: %w", err)
 	}
 	if err == nil {
 		if capiProviderDeployment.Spec.Template.ObjectMeta.Labels[hyperv1.ControlPlaneComponentLabel] != "capi-provider" {
@@ -3318,6 +3309,17 @@ func reconcileCAPIManagerClusterRoleBinding(binding *rbacv1.ClusterRoleBinding, 
 		},
 	}
 	return nil
+}
+
+func invertConditionStatus(s metav1.ConditionStatus) metav1.ConditionStatus {
+	switch s {
+	case metav1.ConditionTrue:
+		return metav1.ConditionFalse
+	case metav1.ConditionFalse:
+		return metav1.ConditionTrue
+	default:
+		return metav1.ConditionUnknown
+	}
 }
 
 // computeClusterVersionStatus determines the ClusterVersionStatus of the
@@ -5006,7 +5008,7 @@ func (r *HostedClusterReconciler) reconcileAWSResourceTags(ctx context.Context, 
 		return nil
 	}
 
-	var existing *hyperv1.AWSResourceTag
+	var existing *hyperv1.AWSClusterResourceTag
 	for idx, tag := range hcluster.Spec.Platform.AWS.ResourceTags {
 		if tag.Key == "kubernetes.io/cluster/"+hcluster.Spec.InfraID {
 			existing = &hcluster.Spec.Platform.AWS.ResourceTags[idx]
@@ -5020,7 +5022,7 @@ func (r *HostedClusterReconciler) reconcileAWSResourceTags(ctx context.Context, 
 	if existing != nil {
 		existing.Value = "owned"
 	} else {
-		hcluster.Spec.Platform.AWS.ResourceTags = append(hcluster.Spec.Platform.AWS.ResourceTags, hyperv1.AWSResourceTag{
+		hcluster.Spec.Platform.AWS.ResourceTags = append(hcluster.Spec.Platform.AWS.ResourceTags, hyperv1.AWSClusterResourceTag{
 			Key:   "kubernetes.io/cluster/" + hcluster.Spec.InfraID,
 			Value: "owned",
 		})
