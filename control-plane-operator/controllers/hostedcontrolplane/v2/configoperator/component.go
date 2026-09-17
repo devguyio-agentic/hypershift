@@ -6,6 +6,8 @@ import (
 	component "github.com/openshift/hypershift/support/controlplane-component"
 	"github.com/openshift/hypershift/support/podspec"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -53,8 +55,19 @@ func NewComponent(registryOverrides map[string]string, openShiftImageRegistryOve
 			"role.yaml",
 			component.WithAdaptFunction(adaptRole),
 		).
+		WithCustomOperandsRolloutCheckFunc(checkHCCOReconciliationSucceeded).
 		InjectAvailabilityProberContainer(availabilityProberOpts).
 		Build()
+}
+
+// checkHCCOReconciliationSucceeded checks whether the HCCO has completed at least
+// one successful reconciliation pass by reading the ConfigOperatorReconciliationSucceeded
+// condition on the HostedControlPlane. This is used by the CPOv2 framework to delay
+// RolloutComplete until the HCCO has written guest cluster resources (including
+// ClusterCSIDriver with the KMS key when configured).
+func checkHCCOReconciliationSucceeded(cpContext component.WorkloadContext) (bool, error) {
+	cond := meta.FindStatusCondition(cpContext.HCP.Status.Conditions, string(hyperv1.ConfigOperatorReconciliationSucceeded))
+	return cond != nil && cond.Status == metav1.ConditionTrue, nil
 }
 
 func hccpAvailabilityProberOpts(caps *hyperv1.Capabilities) podspec.AvailabilityProberOpts {

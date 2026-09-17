@@ -85,6 +85,10 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &hypershiftv1beta1.AutoNodeStatusApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("AWSCloudProviderConfig"):
 		return &hypershiftv1beta1.AWSCloudProviderConfigApplyConfiguration{}
+	case v1beta1.SchemeGroupVersion.WithKind("AWSClusterResourceTag"):
+		return &hypershiftv1beta1.AWSClusterResourceTagApplyConfiguration{}
+	case v1beta1.SchemeGroupVersion.WithKind("AWSCSIDriverConfig"):
+		return &hypershiftv1beta1.AWSCSIDriverConfigApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("AWSKMSAuthSpec"):
 		return &hypershiftv1beta1.AWSKMSAuthSpecApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("AWSKMSKeyEntry"):
@@ -93,14 +97,14 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &hypershiftv1beta1.AWSKMSSpecApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("AWSNodePoolPlatform"):
 		return &hypershiftv1beta1.AWSNodePoolPlatformApplyConfiguration{}
+	case v1beta1.SchemeGroupVersion.WithKind("AWSNodePoolResourceTag"):
+		return &hypershiftv1beta1.AWSNodePoolResourceTagApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("AWSPlatformSpec"):
 		return &hypershiftv1beta1.AWSPlatformSpecApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("AWSPlatformStatus"):
 		return &hypershiftv1beta1.AWSPlatformStatusApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("AWSResourceReference"):
 		return &hypershiftv1beta1.AWSResourceReferenceApplyConfiguration{}
-	case v1beta1.SchemeGroupVersion.WithKind("AWSResourceTag"):
-		return &hypershiftv1beta1.AWSResourceTagApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("AWSRolesRef"):
 		return &hypershiftv1beta1.AWSRolesRefApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("AWSServiceEndpoint"):
@@ -173,6 +177,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &hypershiftv1beta1.ControlPlaneUpdateHistoryApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("ControlPlaneVersionStatus"):
 		return &hypershiftv1beta1.ControlPlaneVersionStatusApplyConfiguration{}
+	case v1beta1.SchemeGroupVersion.WithKind("CSIDriverOperatorConfig"):
+		return &hypershiftv1beta1.CSIDriverOperatorConfigApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("DataPlaneManagedIdentities"):
 		return &hypershiftv1beta1.DataPlaneManagedIdentitiesApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("Diagnostics"):

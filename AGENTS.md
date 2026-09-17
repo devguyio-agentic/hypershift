@@ -28,6 +28,7 @@ Project documentation is published via MkDocs. The site structure and navigation
 | **Upgrades lifecycle** | [docs/content/how-to/upgrades.md](docs/content/how-to/upgrades.md) |
 | **Contributing and PR workflow** | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | **Agentic SDLC framework** | [docs/content/how-to/agentic-sdlc.md](docs/content/how-to/agentic-sdlc.md) |
+| **Feature gates** | [docs/content/how-to/feature-gates.md](docs/content/how-to/feature-gates.md) — two separate systems: management cluster gates vs hosted cluster gates |
 | **Pre-commit hooks** | [docs/content/contribute/precommit-hook-help.md](docs/content/contribute/precommit-hook-help.md) |
 
 ## Pull Secret Cycling
@@ -39,3 +40,5 @@ See [docs/content/how-to/common/global-pull-secret.md](docs/content/how-to/commo
 ## Fleet-Wide Rollout Impact
 
 Changes to config data, secrets, or any value that feeds into a NodePool config hash will trigger a rollout across **all** HostedClusters. Before adding new data to ignition configs, MachineConfigs, or any resource reconciled into the data plane, check whether the change affects the NodePool config hash (search for `hashStruct` / `configHash`). If it does, the PR **must** pass `e2e-aws-upgrade-hypershift-operator` to prove the rollout is safe.
+
+Additionally, consider the **deployment-time migration impact** on existing NodePools: if the hash was previously computed with different inputs (e.g., an image resolved from a different source), deploying the change will cause a one-time hash change and rollout across all affected NodePools — even when HC and NodePool are at the same version. Reviewers must ask: "what happens to clusters that already exist when this operator version is deployed?"

@@ -7,11 +7,6 @@ theme:
   - content.code.annotate
 plugins:
 - search
-- mermaid2:
-    version: 11.2.0
-    javascript: https://unpkg.com/mermaid@11.2.0/dist/mermaid.min.js
-    arguments:
-      securityLevel: loose
 - glightbox:
     touchNavigation: true
     loop: false
@@ -43,7 +38,7 @@ markdown_extensions:
     custom_fences:
     - name: mermaid
       class: mermaid
-      format: !!python/name:mermaid2.fence_mermaid
+      format: !!python/name:pymdownx.superfences.fence_code_format
 - pymdownx.snippets
 - admonition
 - pymdownx.details
@@ -108,6 +103,7 @@ nav:
       - 'Writing V2 Tests': how-to/ci/v2-testing/writing-tests.md
       - 'CI Pipeline Configuration': how-to/ci/v2-testing/ci-pipeline.md
       - 'Debugging CI Failures': how-to/ci/v2-testing/debugging.md
+      - 'Test Flow': how-to/ci/v2-testing/test-flow.md
       - 'Migrating from V1': how-to/ci/v2-testing/migration.md
   - 'Cluster Capabilities': how-to/cluster-capabilities.md
   - 'Common':
@@ -121,6 +117,7 @@ nav:
     - how-to/configure-ocp-components/kubeapi-server.md
     - how-to/configure-ocp-components/oauth-serving-certificates.md
     - how-to/configure-ocp-components/custom-kas-kubeconfig.md
+    - how-to/configure-ocp-components/configurable-log-levels.md
   - how-to/per-hostedcluster-dashboard.md
   - 'Disaster Recovery':
     - how-to/disaster-recovery/index.md
@@ -376,6 +373,13 @@ nav:
   - reference/concepts-and-personas.md
   - reference/controller-architecture.md
   - reference/goals-and-design-invariants.md
+  - 'HO Konflux Release Gating':
+    - reference/ho-release-gating/index.md
+    - 'Release Strategy': reference/ho-release-gating/strategy.md
+    - 'Architecture': reference/ho-release-gating/architecture.md
+    - 'Adding E2E Tests': reference/ho-release-gating/extending-tests.md
+    - 'Extending to Other Services': reference/ho-release-gating/extending-services.md
+    - 'Operations and Troubleshooting': reference/ho-release-gating/troubleshooting.md
   - "Infrastructure":
     - reference/infrastructure/index.md
     - "AWS": reference/infrastructure/aws.md
@@ -422,6 +426,7 @@ nav:
   - 'Retrospective Guidelines': contribute/retrospective-guidelines.md
 - 'Blog':
   - blog/index.md
+  - 'July 2026 Progress Report': blog/2026-07-progress-report.md
   - 'June 2026 Progress Report': blog/2026-06-progress-report.md
 - 'Videos':
   - videos/index.md

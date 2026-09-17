@@ -13,7 +13,6 @@ import (
 // ClusterSpec describes a single cluster to create for lifecycle tests.
 type ClusterSpec struct {
 	Variant      string
-	OutputFile   string // filename under SHARED_DIR
 	ExtraArgs    []string
 	ReleaseImage string // override (empty = use default)
 }
@@ -21,7 +20,7 @@ type ClusterSpec struct {
 // TestGroup describes one logical group of e2e tests to execute.
 type TestGroup struct {
 	Name        string
-	ClusterFile string // filename under SHARED_DIR containing cluster name
+	Variant     string
 	LabelFilter string
 	Skip        string
 	JUnitFile   string
@@ -42,6 +41,40 @@ type SequentialGroup struct {
 type TestMatrix struct {
 	Parallel   []TestGroup
 	Sequential []SequentialGroup
+}
+
+// ResolveVariants validates that every variant referenced by the test
+// matrix exists in the manifest and returns a map from variant to
+// ClusterEntry. Returns an error listing all missing variants.
+func (m TestMatrix) ResolveVariants(manifest *ClusterManifest) (map[string]ClusterEntry, error) {
+	resolved := make(map[string]ClusterEntry)
+	var missing []string
+
+	resolve := func(variant string) {
+		if _, ok := resolved[variant]; ok {
+			return
+		}
+		entry, err := manifest.LookupCluster(variant)
+		if err != nil {
+			missing = append(missing, variant)
+			return
+		}
+		resolved[variant] = entry
+	}
+
+	for _, g := range m.Parallel {
+		resolve(g.Variant)
+	}
+	for _, sg := range m.Sequential {
+		for _, step := range sg.Steps {
+			resolve(step.Variant)
+		}
+	}
+
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("manifest missing variants: %v", missing)
+	}
+	return resolved, nil
 }
 
 // PlatformConfig provides all platform-specific configuration for
@@ -95,7 +128,6 @@ type PlatformConfig interface {
 	// DestroyArgs returns platform-specific args for
 	// "hypershift destroy cluster <platform>".
 	DestroyArgs() []string
-
 }
 
 // NewPlatformConfig creates a PlatformConfig for the given platform
@@ -105,8 +137,13 @@ func NewPlatformConfig(platform, sharedDir string) (PlatformConfig, error) {
 	switch platform {
 	case "azure", "":
 		return NewAzurePlatformConfig(sharedDir), nil
+	case "aws":
+		return NewAWSPlatformConfig(AWSPlatformOptions{
+			Region: envOrDefault("HYPERSHIFT_AWS_REGION", "us-east-1"),
+			Zones:  envOrDefault("HYPERSHIFT_AWS_ZONES", "us-east-1a"),
+		}, sharedDir), nil
 	default:
-		return nil, fmt.Errorf("unsupported platform %q (supported: azure)", platform)
+		return nil, fmt.Errorf("unsupported platform %q (supported: azure, aws)", platform)
 	}
 }
 
@@ -119,4 +156,3 @@ func DeriveClusterName(prowJobID, variant string) string {
 	hash := sha256.Sum256([]byte(prowJobID))
 	return variant + "-" + fmt.Sprintf("%x", hash)[:10]
 }
-
