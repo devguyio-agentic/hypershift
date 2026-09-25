@@ -3,6 +3,7 @@ package hostedcluster
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -433,14 +434,7 @@ func (r *HostedClusterReconciler) reconcileLegacy(ctx context.Context, req ctrl.
 			// So consumers e.g. UI can categorize as good (True) / bad (False).
 			if conditionType == hyperv1.ClusterVersionSucceeding {
 				hcCVOCondition.Type = string(hyperv1.ClusterVersionSucceeding)
-				var status metav1.ConditionStatus
-				switch hcpCVOConditions[conditionType].Status {
-				case metav1.ConditionTrue:
-					status = metav1.ConditionFalse
-				case metav1.ConditionFalse:
-					status = metav1.ConditionTrue
-				}
-				hcCVOCondition.Status = status
+				hcCVOCondition.Status = invertConditionStatus(hcpCVOConditions[conditionType].Status)
 			}
 		}
 
@@ -526,6 +520,9 @@ func (r *HostedClusterReconciler) reconcileLegacy(ctx context.Context, req ctrl.
 			meta.SetStatusCondition(&hcluster.Status.Conditions, *condition)
 		}
 	}
+
+	// Aggregate deprecated-configuration warnings from the HostedCluster and the HCP.
+	r.reconcileDeprecatedConfigurationStatus(hcluster, hcp)
 
 	// Copy the platform status from the hostedcontrolplane
 	if hcp != nil {
@@ -795,7 +792,7 @@ func (r *HostedClusterReconciler) reconcileLegacy(ctx context.Context, req ctrl.
 				}
 			}
 			if err == nil && serviceFirstNodePortAvailable(ignitionService) {
-				hcluster.Status.IgnitionEndpoint = fmt.Sprintf("%s:%d", serviceStrategy.NodePort.Address, ignitionService.Spec.Ports[0].NodePort)
+				hcluster.Status.IgnitionEndpoint = net.JoinHostPort(serviceStrategy.NodePort.Address, strconv.Itoa(int(ignitionService.Spec.Ports[0].NodePort)))
 			}
 		default:
 			// We don't return the error here as reconciling won't solve the input problem.
@@ -1367,6 +1364,10 @@ func (r *HostedClusterReconciler) reconcileLegacy(ctx context.Context, req ctrl.
 		}
 	}
 
+	if err := r.reconcileIngressDefaultCertSync(ctx, hcluster, createOrUpdate, controlPlaneNamespace.Name); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile ingress default certificate: %w", err)
+	}
+
 	// Reconcile the HostedControlPlane AdditionalTrustBundle ConfigMap by resolving the source reference
 	// from the HostedCluster and syncing the CM in the control plane namespace.
 	if err := r.reconcileAdditionalTrustBundle(ctx, hcluster, createOrUpdate, controlPlaneNamespace.Name); err != nil {
@@ -1699,7 +1700,7 @@ func (r *HostedClusterReconciler) reconcileLegacy(ctx context.Context, req ctrl.
 	}
 
 	// Reconcile the CAPI manager components
-	err = r.reconcileCAPIManager(cpContext, createOrUpdate, hcluster)
+	err = r.reconcileCAPIManager(cpContext, createOrUpdate, hcluster, releaseImageVersion)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to reconcile capi manager: %w", err)
 	}

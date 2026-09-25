@@ -103,19 +103,19 @@ func (cvo *clusterVersionOperator) adaptDeployment(cpContext component.WorkloadC
 		})
 	})
 
-	configuration := cpContext.HCP.Spec.Configuration
+	tlsArgs, err := config.TLSArgs(cpContext.HCP.Spec.Configuration.GetTLSSecurityProfile())
+	if err != nil {
+		return err
+	}
+
 	podspec.UpdateContainer(ComponentName, deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
 		podspec.UpsertEnvVar(c, corev1.EnvVar{
 			Name:  "RELEASE_IMAGE",
 			Value: dataPlaneReleaseImage,
 		})
 
-		tlsProfile := configuration.GetTLSSecurityProfile()
-		if tlsMinVersion := config.MinTLSVersion(tlsProfile); tlsMinVersion != "" {
-			c.Args = append(c.Args, fmt.Sprintf("--tls-min-version=%s", tlsMinVersion))
-		}
-		if cipherSuites := config.CipherSuites(tlsProfile); len(cipherSuites) != 0 {
-			c.Args = append(c.Args, fmt.Sprintf("--tls-cipher-suites=%s", strings.Join(cipherSuites, ",")))
+		if len(tlsArgs) > 0 {
+			c.Args = append(c.Args, tlsArgs...)
 		}
 
 		if updateService := cpContext.HCP.Spec.UpdateService; updateService != "" {
@@ -297,6 +297,8 @@ func resourcesToRemove(platformType hyperv1.PlatformType) []client.Object {
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "csi-snapshot-controller-operator", Namespace: "openshift-cluster-storage-operator"}},
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "aws-ebs-csi-driver-operator", Namespace: "openshift-cluster-csi-drivers"}},
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "aws-ebs-csi-driver-controller", Namespace: "openshift-cluster-csi-drivers"}},
+			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "gcp-pd-csi-driver-operator", Namespace: "openshift-cluster-csi-drivers"}},
+			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "gcp-pd-csi-driver-controller", Namespace: "openshift-cluster-csi-drivers"}},
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "csi-snapshot-controller", Namespace: "openshift-cluster-storage-operator"}},
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "kube-storage-version-migrator-operator", Namespace: "openshift-kube-storage-version-migrator-operator"}},
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "migrator", Namespace: "openshift-kube-storage-version-migrator"}},

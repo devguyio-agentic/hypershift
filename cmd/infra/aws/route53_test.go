@@ -104,7 +104,7 @@ func TestLookupPublicZone(t *testing.T) {
 			expectID: "PUBZONE",
 		},
 		{
-			name:       "When the zone API call fails it should return an error",
+			name:       "When the zone API call fails, it should return an error",
 			baseDomain: testBaseDomain,
 			useCtx:     cancelledCtx,
 			setupMock: func(m *awsapi.MockROUTE53API) {
@@ -114,7 +114,7 @@ func TestLookupPublicZone(t *testing.T) {
 			expectError: true,
 		},
 		{
-			name:       "When redact is true and zone lookup fails it should return error without logging the domain",
+			name:       "When redact is true and zone lookup fails, it should return error without logging the domain",
 			baseDomain: "secret.example.com",
 			redact:     true,
 			useCtx:     cancelledCtx,
@@ -253,7 +253,7 @@ func TestCreatePrivateZone(t *testing.T) {
 			expectID: "AUTHZONE",
 		},
 		{
-			name:     "When CreateHostedZone fails it should return a wrapped error",
+			name:     "When CreateHostedZone fails, it should return a wrapped error",
 			zoneName: testZoneName,
 			vpcID:    testVPCID,
 			useCtx:   cancelledCtx,
@@ -268,7 +268,7 @@ func TestCreatePrivateZone(t *testing.T) {
 			errorContains:     "failed to create hosted zone",
 		},
 		{
-			name:     "When setSOAMinimum fails on an existing zone it should return an error",
+			name:     "When setSOAMinimum fails on an existing zone, it should return an error",
 			zoneName: testZoneName,
 			vpcID:    testVPCID,
 			setupMock: func(m *awsapi.MockROUTE53API) {
@@ -316,6 +316,55 @@ func TestCreatePrivateZone(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCreatePrivateZoneUsesStableCallerReferenceAcrossRetries(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockR53 := awsapi.NewMockROUTE53API(ctrl)
+	mockVPCOwner := awsapi.NewMockROUTE53API(ctrl)
+
+	mockR53.EXPECT().ListHostedZones(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(emptyZonePage(), nil)
+
+	var callerReferences []string
+	mockR53.EXPECT().CreateHostedZone(gomock.Any(), gomock.Any(), gomock.Any()).
+		Times(2).
+		DoAndReturn(func(_ context.Context, input *route53.CreateHostedZoneInput, _ ...func(*route53.Options)) (*route53.CreateHostedZoneOutput, error) {
+			callerReferences = append(callerReferences, aws.ToString(input.CallerReference))
+			if len(callerReferences) == 1 {
+				return nil, errors.New("temporary create error")
+			}
+			return &route53.CreateHostedZoneOutput{
+				HostedZone: &route53types.HostedZone{
+					Id:   aws.String("/hostedzone/RETRIEDZONE"),
+					Name: aws.String(testZoneName + "."),
+				},
+			}, nil
+		})
+	mockR53.EXPECT().ChangeTagsForResource(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(&route53.ChangeTagsForResourceOutput{}, nil)
+	mockR53.EXPECT().ListResourceRecordSets(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(soaRecordFor(testZoneName), nil)
+	mockR53.EXPECT().ChangeResourceRecordSets(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(&route53.ChangeResourceRecordSetsOutput{}, nil)
+
+	o := &CreateInfraOptions{Region: "us-east-1"}
+	id, err := o.CreatePrivateZone(context.Background(), logr.Discard(), mockR53, testZoneName, testVPCID, false, mockVPCOwner, "")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if id != "RETRIEDZONE" {
+		t.Fatalf("expected zone ID %q, got %q", "RETRIEDZONE", id)
+	}
+	if len(callerReferences) != 2 {
+		t.Fatalf("expected two caller references, got %d", len(callerReferences))
+	}
+	if callerReferences[0] == "" {
+		t.Fatal("expected a non-empty caller reference")
+	}
+	if callerReferences[0] != callerReferences[1] {
+		t.Fatalf("expected retries to use the same caller reference, got %q and %q", callerReferences[0], callerReferences[1])
 	}
 }
 
@@ -388,7 +437,7 @@ func TestCleanupPublicZone(t *testing.T) {
 			},
 		},
 		{
-			name:   "When LookupZone fails with a non-not-found error it should return a wrapped error",
+			name:   "When LookupZone fails with a non-not-found error, it should return a wrapped error",
 			useCtx: cancelledCtx,
 			setupMock: func(m *awsapi.MockROUTE53API) {
 				m.EXPECT().ListHostedZones(gomock.Any(), gomock.Any(), gomock.Any()).
@@ -398,7 +447,7 @@ func TestCleanupPublicZone(t *testing.T) {
 			errorContains: "failed to lookup public hosted zone",
 		},
 		{
-			name: "When ChangeResourceRecordSets fails with a non-404 error it should return the error",
+			name: "When ChangeResourceRecordSets fails with a non-404 error, it should return the error",
 			setupMock: func(m *awsapi.MockROUTE53API) {
 				m.EXPECT().ListHostedZones(gomock.Any(), gomock.Any(), gomock.Any()).
 					Return(publicZonePage("PUBZONE", testBaseDomain), nil)
@@ -484,7 +533,7 @@ func TestDestroyDNS(t *testing.T) {
 			},
 		},
 		{
-			name: "When CleanupPublicZone fails it should return the error",
+			name: "When CleanupPublicZone fails, it should return the error",
 			setupMock: func(m *awsapi.MockROUTE53API) {
 				m.EXPECT().ListHostedZones(gomock.Any(), gomock.Any(), gomock.Any()).
 					Return(publicZonePage("PUBZONE", testBaseDomain), nil)
@@ -574,7 +623,7 @@ func TestDestroyPrivateZones(t *testing.T) {
 			setupRecsMock: func(_ *awsapi.MockROUTE53API) {},
 		},
 		{
-			name:   "When ListHostedZonesByVPC fails it should return the error",
+			name:   "When ListHostedZonesByVPC fails, it should return the error",
 			useCtx: cancelledCtx,
 			setupListMock: func(m *awsapi.MockROUTE53API) {
 				m.EXPECT().ListHostedZonesByVPC(gomock.Any(), gomock.Any(), gomock.Any()).
@@ -585,7 +634,7 @@ func TestDestroyPrivateZones(t *testing.T) {
 			errorContains: "failed to list hosted zones for vpc",
 		},
 		{
-			name: "When deleteZone fails it should return the error",
+			name: "When deleteZone fails, it should return the error",
 			setupListMock: func(m *awsapi.MockROUTE53API) {
 				m.EXPECT().ListHostedZonesByVPC(gomock.Any(), gomock.Any(), gomock.Any()).
 					Return(&route53.ListHostedZonesByVPCOutput{

@@ -35,7 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
-	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -57,7 +57,7 @@ func TestIsUpdatingConfig(t *testing.T) {
 		expect   bool
 	}{
 		{
-			name: "it is not updating when strings match",
+			name: "When strings match, it should not update",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
@@ -69,7 +69,7 @@ func TestIsUpdatingConfig(t *testing.T) {
 			expect: false,
 		},
 		{
-			name: "it is updating when strings does not match",
+			name: "When strings do not match, it should update",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
@@ -100,7 +100,7 @@ func TestIsUpdatingVersion(t *testing.T) {
 		expect   bool
 	}{
 		{
-			name: "it is not updating when strings match",
+			name: "When strings match, it should not update",
 			nodePool: &hyperv1.NodePool{
 				Status: hyperv1.NodePoolStatus{
 					Version: "same",
@@ -110,7 +110,7 @@ func TestIsUpdatingVersion(t *testing.T) {
 			expect: false,
 		},
 		{
-			name: "it is updating when strings does not match",
+			name: "When strings do not match, it should update",
 			nodePool: &hyperv1.NodePool{
 				Status: hyperv1.NodePoolStatus{
 					Version: "v1",
@@ -138,7 +138,7 @@ func TestIsAutoscalingEnabled(t *testing.T) {
 		expect   bool
 	}{
 		{
-			name: "it is enabled when the struct is not nil and has no values",
+			name: "When the struct is not nil and has no values, it should be enabled",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					AutoScaling: &hyperv1.NodePoolAutoScaling{
@@ -150,7 +150,7 @@ func TestIsAutoscalingEnabled(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "it is enabled when the struct is not nil and has values",
+			name: "When the struct is not nil and has values, it should be enabled",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					AutoScaling: &hyperv1.NodePoolAutoScaling{
@@ -162,7 +162,7 @@ func TestIsAutoscalingEnabled(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "it is not enabled when the struct is nil",
+			name: "When the struct is nil, it should not be enabled",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{},
 			},
@@ -188,7 +188,7 @@ func TestValidateManagement(t *testing.T) {
 		error    bool
 	}{
 		{
-			name: "it fails with bad upgradeType",
+			name: "When bad upgradeType is set, it should fail",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{},
 				Spec: hyperv1.NodePoolSpec{
@@ -204,7 +204,7 @@ func TestValidateManagement(t *testing.T) {
 			error: true,
 		},
 		{
-			name: "it fails with Replace type and no Replace settings",
+			name: "When Replace type has no Replace settings, it should fail",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{},
 				Spec: hyperv1.NodePoolSpec{
@@ -216,7 +216,7 @@ func TestValidateManagement(t *testing.T) {
 			error: true,
 		},
 		{
-			name: "it fails with Replace type and bad strategy",
+			name: "When Replace type has bad strategy, it should fail",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{},
 				Spec: hyperv1.NodePoolSpec{
@@ -235,7 +235,7 @@ func TestValidateManagement(t *testing.T) {
 			error: true,
 		},
 		{
-			name: "it fails with Replace type, RollingUpdate strategy and no rollingUpdate settings",
+			name: "When Replace type has RollingUpdate strategy and no rollingUpdate settings, it should fail",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{},
 				Spec: hyperv1.NodePoolSpec{
@@ -251,7 +251,7 @@ func TestValidateManagement(t *testing.T) {
 			error: true,
 		},
 		{
-			name: "it passes with Replace type, RollingUpdate strategy and RollingUpdate settings",
+			name: "When Replace type has RollingUpdate strategy and RollingUpdate settings, it should pass",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{},
 				Spec: hyperv1.NodePoolSpec{
@@ -270,7 +270,7 @@ func TestValidateManagement(t *testing.T) {
 			error: false,
 		},
 		{
-			name: "it passes with Replace type and OnDelete strategy",
+			name: "When Replace type has OnDelete strategy, it should pass",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{},
 				Spec: hyperv1.NodePoolSpec{
@@ -345,7 +345,7 @@ func TestGetNodePoolNamespacedName(t *testing.T) {
 		error                 bool
 	}{
 		{
-			name:                  "gets correct NodePool namespaced name",
+			name:                  "When HostedControlPlane has cluster annotation, it should return correct NodePool namespaced name",
 			nodePoolName:          testNodePoolName,
 			controlPlaneNamespace: testControlPlaneNamespace,
 			hostedControlPlane: &hyperv1.HostedControlPlane{
@@ -360,7 +360,7 @@ func TestGetNodePoolNamespacedName(t *testing.T) {
 			error:  false,
 		},
 		{
-			name:                  "fails if HostedControlPlane missing HostedClusterAnnotation",
+			name:                  "When HostedControlPlane is missing HostedClusterAnnotation, it should fail",
 			nodePoolName:          testNodePoolName,
 			controlPlaneNamespace: testControlPlaneNamespace,
 			hostedControlPlane: &hyperv1.HostedControlPlane{
@@ -372,7 +372,7 @@ func TestGetNodePoolNamespacedName(t *testing.T) {
 			error:  true,
 		},
 		{
-			name:                  "fails if HostedControlPlane does not exist",
+			name:                  "When HostedControlPlane does not exist, it should fail",
 			nodePoolName:          testNodePoolName,
 			controlPlaneNamespace: testControlPlaneNamespace,
 			hostedControlPlane:    nil,
@@ -452,7 +452,7 @@ func TestCreateValidGeneratedPayloadCondition(t *testing.T) {
 		expectedCondition       *hyperv1.NodePoolCondition
 	}{
 		{
-			name: "when token secret is not found it should report it in the condition",
+			name: "When token secret is not found, it should report it in the condition",
 			tokenSecret: &corev1.Secret{
 				TypeMeta: metav1.TypeMeta{},
 				ObjectMeta: metav1.ObjectMeta{
@@ -472,7 +472,7 @@ func TestCreateValidGeneratedPayloadCondition(t *testing.T) {
 			},
 		},
 		{
-			name: "when token secret has data it should report it in the condition",
+			name: "When token secret has data, it should report it in the condition",
 			tokenSecret: &corev1.Secret{
 				TypeMeta: metav1.TypeMeta{},
 				ObjectMeta: metav1.ObjectMeta{
@@ -495,7 +495,7 @@ func TestCreateValidGeneratedPayloadCondition(t *testing.T) {
 			},
 		},
 		{
-			name: "when token secret has no data it should report unknown in the condition",
+			name: "When token secret has no data, it should report unknown in the condition",
 			tokenSecret: &corev1.Secret{
 				TypeMeta: metav1.TypeMeta{},
 				ObjectMeta: metav1.ObjectMeta{
@@ -694,12 +694,12 @@ func TestGetHostedClusterVersion(t *testing.T) {
 		expectedVersion     string
 	}{
 		{
-			name:                "version history status is empty, should return release image version",
+			name:                "When version history status is empty, it should return release image version",
 			releaseImageVersion: "4.15.0",
 			expectedVersion:     "4.15.0",
 		},
 		{
-			name: "version history status has a completed entry, should return the completed version",
+			name: "When version history status has a completed entry, it should return the completed version",
 			versionStatus: &hyperv1.ClusterVersionStatus{
 				History: []configv1.UpdateHistory{
 					{
@@ -712,7 +712,7 @@ func TestGetHostedClusterVersion(t *testing.T) {
 			expectedVersion:     "4.14.0",
 		},
 		{
-			name: "version history status has no completed entries, should return release image version",
+			name: "When version history status has no completed entries, it should return release image version",
 			versionStatus: &hyperv1.ClusterVersionStatus{
 				History: []configv1.UpdateHistory{
 					{
@@ -725,7 +725,7 @@ func TestGetHostedClusterVersion(t *testing.T) {
 			expectedVersion:     "4.15.0",
 		},
 		{
-			name: "version history status has multiple entries, should return the first completed version",
+			name: "When version history status has multiple entries, it should return the first completed version",
 			versionStatus: &hyperv1.ClusterVersionStatus{
 				History: []configv1.UpdateHistory{
 					{
@@ -782,13 +782,13 @@ func TestFindMachineStatusCondition(t *testing.T) {
 		expected      *machineConditionResult
 	}{
 		{
-			name: "When condition is False it should return the condition values",
+			name: "When condition is False, it should return the condition values",
 			machine: &capiv1.Machine{
 				Status: capiv1.MachineStatus{
-					Conditions: []capiv1.Condition{
+					Conditions: []metav1.Condition{
 						{
 							Type:    capiv1.ReadyCondition,
-							Status:  corev1.ConditionFalse,
+							Status:  metav1.ConditionFalse,
 							Reason:  "InstanceTerminated",
 							Message: "i-0abc123def456 instance is in terminated state",
 						},
@@ -797,19 +797,19 @@ func TestFindMachineStatusCondition(t *testing.T) {
 			},
 			conditionType: string(capiv1.ReadyCondition),
 			expected: &machineConditionResult{
-				Status:  corev1.ConditionFalse,
+				Status:  metav1.ConditionFalse,
 				Reason:  "InstanceTerminated",
 				Message: "i-0abc123def456 instance is in terminated state",
 			},
 		},
 		{
-			name: "When neither has condition it should return nil",
+			name: "When neither has condition, it should return nil",
 			machine: &capiv1.Machine{
 				Status: capiv1.MachineStatus{
-					Conditions: []capiv1.Condition{
+					Conditions: []metav1.Condition{
 						{
 							Type:   capiv1.InfrastructureReadyCondition,
-							Status: corev1.ConditionTrue,
+							Status: metav1.ConditionTrue,
 						},
 					},
 				},
@@ -818,13 +818,13 @@ func TestFindMachineStatusCondition(t *testing.T) {
 			expected:      nil,
 		},
 		{
-			name: "When condition is True it should return the condition values",
+			name: "When condition is True, it should return the condition values",
 			machine: &capiv1.Machine{
 				Status: capiv1.MachineStatus{
-					Conditions: []capiv1.Condition{
+					Conditions: []metav1.Condition{
 						{
 							Type:    capiv1.ReadyCondition,
-							Status:  corev1.ConditionTrue,
+							Status:  metav1.ConditionTrue,
 							Reason:  "InstanceProvisionStarted",
 							Message: "started provisioning i-0abc123def456",
 						},
@@ -833,34 +833,34 @@ func TestFindMachineStatusCondition(t *testing.T) {
 			},
 			conditionType: string(capiv1.ReadyCondition),
 			expected: &machineConditionResult{
-				Status:  corev1.ConditionTrue,
+				Status:  metav1.ConditionTrue,
 				Reason:  "InstanceProvisionStarted",
 				Message: "started provisioning i-0abc123def456",
 			},
 		},
 		{
-			name: "When machine has no conditions it should return nil",
+			name: "When machine has no conditions, it should return nil",
 			machine: &capiv1.Machine{
 				Status: capiv1.MachineStatus{
-					Conditions: []capiv1.Condition{},
+					Conditions: []metav1.Condition{},
 				},
 			},
 			conditionType: string(capiv1.ReadyCondition),
 			expected:      nil,
 		},
 		{
-			name: "When looking up MachineNodeHealthyCondition it should return matching values",
+			name: "When looking up MachineNodeHealthyCondition, it should return matching values",
 			machine: &capiv1.Machine{
 				Status: capiv1.MachineStatus{
-					Conditions: []capiv1.Condition{
+					Conditions: []metav1.Condition{
 						{
 							Type:   capiv1.ReadyCondition,
-							Status: corev1.ConditionTrue,
+							Status: metav1.ConditionTrue,
 						},
 						{
 							Type:    capiv1.MachineNodeHealthyCondition,
-							Status:  corev1.ConditionFalse,
-							Reason:  capiv1.NodeConditionsFailedReason,
+							Status:  metav1.ConditionFalse,
+							Reason:  capiv1.NodeConditionsFailedV1Beta1Reason,
 							Message: "Condition Ready on node is reporting status False",
 						},
 					},
@@ -868,8 +868,8 @@ func TestFindMachineStatusCondition(t *testing.T) {
 			},
 			conditionType: string(capiv1.MachineNodeHealthyCondition),
 			expected: &machineConditionResult{
-				Status:  corev1.ConditionFalse,
-				Reason:  capiv1.NodeConditionsFailedReason,
+				Status:  metav1.ConditionFalse,
+				Reason:  capiv1.NodeConditionsFailedV1Beta1Reason,
 				Message: "Condition Ready on node is reporting status False",
 			},
 		},
@@ -935,7 +935,7 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 		expectedCIDRCollision *testCondition
 	}{
 		{
-			name:              "no cluster-api machines",
+			name:              "When there are no cluster-api machines, it should set WaitingForMachines condition",
 			machinesGenerator: func() []client.Object { return nil },
 			expectedAllMachine: &testCondition{
 				Status:   corev1.ConditionFalse,
@@ -948,7 +948,7 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 		},
 		{
-			name: "good machines",
+			name: "When all machines are healthy, it should set AllMachinesReady condition",
 			machinesGenerator: func() []client.Object {
 				return []client.Object{
 					&capiv1.Machine{
@@ -960,14 +960,14 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -981,14 +981,14 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -1007,7 +1007,7 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 		},
 		{
-			name: "no InfrastructureReady condition",
+			name: "When machines have no InfrastructureReady condition, it should report waiting",
 			machinesGenerator: func() []client.Object {
 				return []client.Object{
 					&capiv1.Machine{
@@ -1019,16 +1019,16 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:    capiv1.ReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode1",
 									Message: "test message node 1",
 								},
 								{
 									Type:    capiv1.MachineNodeHealthyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode1",
 									Message: "test message node 1",
 								},
@@ -1044,16 +1044,16 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:    capiv1.ReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode2",
 									Message: "test message node 2",
 								},
 								{
 									Type:    capiv1.MachineNodeHealthyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode2",
 									Message: "test message node 2",
 								},
@@ -1074,7 +1074,7 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 		},
 		{
-			name: "mix InfrastructureReady condition; setup counter first",
+			name: "When machines have mixed InfrastructureReady conditions with setup counter first, it should report mixed status",
 			machinesGenerator: func() []client.Object {
 				return []client.Object{
 					&capiv1.Machine{
@@ -1087,22 +1087,22 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:    capiv1.ReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode1",
 									Message: "test message node 1",
 								},
 								{
 									Type:    capiv1.InfrastructureReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode1",
 									Message: "12 of 34 completed",
 								},
 								{
 									Type:    capiv1.MachineNodeHealthyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode1",
 									Message: "test message node 1",
 								},
@@ -1119,22 +1119,22 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:    capiv1.ReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode2",
 									Message: "test message node 2",
 								},
 								{
 									Type:    capiv1.InfrastructureReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode2",
 									Message: "some real failed message",
 								},
 								{
 									Type:    capiv1.MachineNodeHealthyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode2",
 									Message: "test message node 2",
 								},
@@ -1151,14 +1151,14 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -1177,7 +1177,7 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 		},
 		{
-			name: "mix InfrastructureReady condition; failure text first",
+			name: "When machines have mixed InfrastructureReady conditions with failure text first, it should report mixed status",
 			machinesGenerator: func() []client.Object {
 				return []client.Object{
 					&capiv1.Machine{
@@ -1190,22 +1190,22 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:    capiv1.ReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode1",
 									Message: "test message node 1",
 								},
 								{
 									Type:    capiv1.InfrastructureReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode1",
 									Message: "some real failed message",
 								},
 								{
 									Type:    capiv1.MachineNodeHealthyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode1",
 									Message: "test message node 1",
 								},
@@ -1222,22 +1222,22 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:    capiv1.ReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode2",
 									Message: "test message node 2",
 								},
 								{
 									Type:    capiv1.InfrastructureReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode2",
 									Message: "12 of 34 completed",
 								},
 								{
 									Type:    capiv1.MachineNodeHealthyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode2",
 									Message: "test message node 2",
 								},
@@ -1254,14 +1254,14 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -1280,7 +1280,7 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 		},
 		{
-			name: "too many not ready machines",
+			name: "When too many machines are not ready, it should truncate the message",
 			machinesGenerator: func() []client.Object {
 				longMessage := strings.Repeat("msg ", 50)
 
@@ -1298,16 +1298,16 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:    capiv1.ReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode1",
 									Message: "not ready",
 								},
 								{
 									Type:    capiv1.InfrastructureReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode1",
 									Message: longMessage,
 								},
@@ -1325,16 +1325,16 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:    capiv1.ReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode2",
 									Message: "not ready",
 								},
 								{
 									Type:    capiv1.InfrastructureReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode2",
 									Message: longMessage,
 								},
@@ -1352,16 +1352,16 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:    capiv1.ReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode3",
 									Message: "not ready",
 								},
 								{
 									Type:    capiv1.InfrastructureReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "TestReasonNode3",
 									Message: longMessage,
 								},
@@ -1379,10 +1379,10 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -1398,7 +1398,7 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 		},
 		{
-			name: "machine cidr collision",
+			name: "When machine has cidr collision, it should report the collision",
 			machinesGenerator: func() []client.Object {
 				return []client.Object{
 					&capiv1.Machine{
@@ -1410,14 +1410,14 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 							Addresses: capiv1.MachineAddresses{
@@ -1437,14 +1437,14 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 							Addresses: capiv1.MachineAddresses{
@@ -1489,10 +1489,10 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -1506,7 +1506,7 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 			expectedAllNodes: &testCondition{
 				Status:   corev1.ConditionFalse,
-				Reason:   capiv1.WaitingForNodeRefReason,
+				Reason:   capiv1.WaitingForNodeRefV1Beta1Reason,
 				Messages: []string{"1 of 1 machines are not healthy", "Machine node1: WaitingForNodeRef"},
 			},
 		},
@@ -1523,10 +1523,10 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -1535,7 +1535,7 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 			expectedAllMachine: &testCondition{
 				Status:   corev1.ConditionFalse,
-				Reason:   capiv1.WaitingForInfrastructureFallbackReason,
+				Reason:   capiv1.WaitingForInfrastructureFallbackV1Beta1Reason,
 				Messages: []string{"1 of 1 machines are not ready", "Machine node1: WaitingForInfrastructure"},
 			},
 			expectedAllNodes: &testCondition{
@@ -1557,15 +1557,15 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionFalse,
-									Reason: capiv1.NodeProvisioningReason,
+									Status: metav1.ConditionFalse,
+									Reason: capiv1.NodeProvisioningV1Beta1Reason,
 								},
 							},
 						},
@@ -1579,8 +1579,8 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 			expectedAllNodes: &testCondition{
 				Status:   corev1.ConditionFalse,
-				Reason:   capiv1.NodeProvisioningReason,
-				Messages: []string{"1 of 1 machines are not healthy", "Machine node1: " + capiv1.NodeProvisioningReason},
+				Reason:   capiv1.NodeProvisioningV1Beta1Reason,
+				Messages: []string{"1 of 1 machines are not healthy", "Machine node1: " + capiv1.NodeProvisioningV1Beta1Reason},
 			},
 		},
 		{
@@ -1596,10 +1596,10 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -1613,15 +1613,15 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 								{
 									Type:    capiv1.MachineNodeHealthyCondition,
-									Status:  corev1.ConditionFalse,
-									Reason:  capiv1.NodeConditionsFailedReason,
+									Status:  metav1.ConditionFalse,
+									Reason:  capiv1.NodeConditionsFailedV1Beta1Reason,
 									Message: "Condition Ready on node is reporting status False",
 								},
 							},
@@ -1636,14 +1636,14 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -1657,8 +1657,8 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 			expectedAllNodes: &testCondition{
 				Status:   corev1.ConditionFalse,
-				Reason:   capiv1.NodeConditionsFailedReason + "," + capiv1.WaitingForNodeRefReason,
-				Messages: []string{"2 of 3 machines are not healthy", "Machine node1: WaitingForNodeRef", "Machine node2: " + capiv1.NodeConditionsFailedReason + ": Condition Ready on node is reporting status False"},
+				Reason:   capiv1.NodeConditionsFailedV1Beta1Reason + "," + capiv1.WaitingForNodeRefV1Beta1Reason,
+				Messages: []string{"2 of 3 machines are not healthy", "Machine node1: WaitingForNodeRef", "Machine node2: " + capiv1.NodeConditionsFailedV1Beta1Reason + ": Condition Ready on node is reporting status False"},
 			},
 		},
 		{
@@ -1674,16 +1674,16 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:    capiv1.ReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "InstanceTerminated",
 									Message: "i-0abc123def456 instance is in terminated state",
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -1714,16 +1714,16 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:    capiv1.ReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  "InstanceProvisionStarted",
 									Message: "3 of 7 completed",
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -1754,10 +1754,10 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -1771,16 +1771,16 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:    capiv1.ReadyCondition,
-									Status:  corev1.ConditionFalse,
-									Reason:  capiv1.MachineHasFailureReason,
+									Status:  metav1.ConditionFalse,
+									Reason:  capiv1.MachineHasFailureV1Beta1Reason,
 									Message: "Machine has FailureMessage: i-0abc123def456 is in terminated state",
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -1789,8 +1789,8 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 			expectedAllMachine: &testCondition{
 				Status:   corev1.ConditionFalse,
-				Reason:   capiv1.MachineHasFailureReason + "," + capiv1.WaitingForInfrastructureFallbackReason,
-				Messages: []string{"2 of 2 machines are not ready", "Machine node1: WaitingForInfrastructure", "Machine node2: " + capiv1.MachineHasFailureReason + ": Machine has FailureMessage: i-0abc123def456 is in terminated state"},
+				Reason:   capiv1.MachineHasFailureV1Beta1Reason + "," + capiv1.WaitingForInfrastructureFallbackV1Beta1Reason,
+				Messages: []string{"2 of 2 machines are not ready", "Machine node1: WaitingForInfrastructure", "Machine node2: " + capiv1.MachineHasFailureV1Beta1Reason + ": Machine has FailureMessage: i-0abc123def456 is in terminated state"},
 			},
 			expectedAllNodes: &testCondition{
 				Status:   corev1.ConditionTrue,
@@ -1821,16 +1821,16 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 								},
 							},
 							Status: capiv1.MachineStatus{
-								Conditions: []capiv1.Condition{
+								Conditions: []metav1.Condition{
 									{
 										Type:    capiv1.ReadyCondition,
-										Status:  corev1.ConditionFalse,
+										Status:  metav1.ConditionFalse,
 										Reason:  fmt.Sprintf("Reason%02d", r),
 										Message: longMsg,
 									},
 									{
 										Type:    capiv1.MachineNodeHealthyCondition,
-										Status:  corev1.ConditionFalse,
+										Status:  metav1.ConditionFalse,
 										Reason:  fmt.Sprintf("Reason%02d", r),
 										Message: longMsg,
 									},
@@ -1862,40 +1862,40 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 					reason  string
 					message string
 				}{
-					{capiv1.WaitingForInfrastructureFallbackReason, ""},
-					{capiv1.MachineHasFailureReason, "Machine has FailureReason: InsufficientCapacity"},
-					{capiv1.DeletingReason, "Waiting for machine volumes to be detached"},
-					{capiv1.DeletionFailedReason, "failed to delete machine"},
-					{capiv1.DrainingReason, "Draining node node-4"},
-					{capiv1.DrainingFailedReason, "failed to drain node: cannot evict pod"},
-					{capiv1.WaitingForVolumeDetachReason, "Waiting for 2 volumes to be detached"},
-					{capiv1.WaitingExternalHookReason, "Waiting for external hook to complete"},
-					{capiv1.PreflightCheckFailedReason, "Machine pre-flight checks failed"},
-					{capiv1.MachineCreationFailedReason, "failed to create machine: quota exceeded"},
-					{capiv1.ScalingUpReason, "Scaling up to 10 replicas"},
-					{capiv1.ScalingDownReason, "Scaling down to 5 replicas"},
-					{capiv1.WaitingForDataSecretFallbackReason, ""},
-					{capiv1.WaitingForControlPlaneFallbackReason, ""},
-					{capiv1.WaitingForControlPlaneAvailableReason, "Control plane is not available"},
-					{capiv1.BootstrapTemplateCloningFailedReason, "failed to clone bootstrap template"},
-					{capiv1.InfrastructureTemplateCloningFailedReason, "failed to clone infrastructure template"},
-					{capiv1.IncorrectExternalRefReason, "external ref is incorrect"},
-					{capiv1.RemediationFailedReason, "remediation failed"},
-					{capiv1.RemediationInProgressReason, "remediation in progress for node-18"},
-					{capiv1.WaitingForRemediationReason, "waiting for remediation to complete"},
-					{capiv1.NodeStartupTimeoutReason, "Node failed to report NodeReady condition within 20m0s"},
-					{capiv1.WaitingForNodeRefReason, ""},
-					{capiv1.NodeProvisioningReason, "Node is provisioning"},
-					{capiv1.NodeNotFoundReason, "node not found in cluster"},
-					{capiv1.NodeConditionsFailedReason, "Condition Ready on node is reporting status False"},
-					{capiv1.NodeInspectionFailedReason, "failed to inspect node"},
-					{capiv1.UnhealthyNodeConditionReason, "Node condition ReadonlyFilesystem is True"},
-					{capiv1.HasRemediateMachineAnnotationReason, "machine has remediate annotation"},
-					{capiv1.TooManyUnhealthyReason, "too many unhealthy machines: 10 of 20"},
-					{capiv1.ExternalRemediationTemplateNotFoundReason, "external remediation template not found"},
-					{capiv1.ExternalRemediationRequestCreationFailedReason, "failed to create external remediation request"},
-					{capiv1.WaitingForControlPlaneProviderInitializedReason, "control plane provider is not initialized"},
-					{capiv1.MissingNodeRefReason, "machine does not have a node ref"},
+					{capiv1.WaitingForInfrastructureFallbackV1Beta1Reason, ""},
+					{capiv1.MachineHasFailureV1Beta1Reason, "Machine has FailureReason: InsufficientCapacity"},
+					{capiv1.DeletingV1Beta1Reason, "Waiting for machine volumes to be detached"},
+					{capiv1.DeletionFailedV1Beta1Reason, "failed to delete machine"},
+					{capiv1.DrainingV1Beta1Reason, "Draining node node-4"},
+					{capiv1.DrainingFailedV1Beta1Reason, "failed to drain node: cannot evict pod"},
+					{capiv1.WaitingForVolumeDetachV1Beta1Reason, "Waiting for 2 volumes to be detached"},
+					{capiv1.WaitingExternalHookV1Beta1Reason, "Waiting for external hook to complete"},
+					{capiv1.PreflightCheckFailedV1Beta1Reason, "Machine pre-flight checks failed"},
+					{capiv1.MachineCreationFailedV1Beta1Reason, "failed to create machine: quota exceeded"},
+					{capiv1.ScalingUpV1Beta1Reason, "Scaling up to 10 replicas"},
+					{capiv1.ScalingDownV1Beta1Reason, "Scaling down to 5 replicas"},
+					{capiv1.WaitingForDataSecretFallbackV1Beta1Reason, ""},
+					{capiv1.WaitingForControlPlaneFallbackV1Beta1Reason, ""},
+					{capiv1.WaitingForControlPlaneAvailableV1Beta1Reason, "Control plane is not available"},
+					{capiv1.BootstrapTemplateCloningFailedV1Beta1Reason, "failed to clone bootstrap template"},
+					{capiv1.InfrastructureTemplateCloningFailedV1Beta1Reason, "failed to clone infrastructure template"},
+					{capiv1.IncorrectExternalRefV1Beta1Reason, "external ref is incorrect"},
+					{capiv1.RemediationFailedV1Beta1Reason, "remediation failed"},
+					{capiv1.RemediationInProgressV1Beta1Reason, "remediation in progress for node-18"},
+					{capiv1.WaitingForRemediationV1Beta1Reason, "waiting for remediation to complete"},
+					{capiv1.NodeStartupTimeoutV1Beta1Reason, "Node failed to report NodeReady condition within 20m0s"},
+					{capiv1.WaitingForNodeRefV1Beta1Reason, ""},
+					{capiv1.NodeProvisioningV1Beta1Reason, "Node is provisioning"},
+					{capiv1.NodeNotFoundV1Beta1Reason, "node not found in cluster"},
+					{capiv1.NodeConditionsFailedV1Beta1Reason, "Condition Ready on node is reporting status False"},
+					{capiv1.NodeInspectionFailedV1Beta1Reason, "failed to inspect node"},
+					{capiv1.UnhealthyNodeConditionV1Beta1Reason, "Node condition ReadonlyFilesystem is True"},
+					{capiv1.HasRemediateMachineAnnotationV1Beta1Reason, "machine has remediate annotation"},
+					{capiv1.TooManyUnhealthyV1Beta1Reason, "too many unhealthy machines: 10 of 20"},
+					{capiv1.ExternalRemediationTemplateNotFoundV1Beta1Reason, "external remediation template not found"},
+					{capiv1.ExternalRemediationRequestCreationFailedV1Beta1Reason, "failed to create external remediation request"},
+					{capiv1.WaitingForControlPlaneProviderInitializedV1Beta1Reason, "control plane provider is not initialized"},
+					{capiv1.MissingNodeRefV1Beta1Reason, "machine does not have a node ref"},
 					// Realistic cloud-provider reasons (CAPA/CAPZ) — already used in existing tests.
 					{"InstanceTerminated", "i-0abc123def456 instance is in terminated state"},
 					{"InstanceProvisionFailed", "failed to create instance: InsufficientInstanceCapacity"},
@@ -1924,16 +1924,16 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:    capiv1.ReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  fr.reason,
 									Message: fr.message,
 								},
 								{
 									Type:    capiv1.MachineNodeHealthyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  fr.reason,
 									Message: fr.message,
 								},
@@ -1963,16 +1963,16 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 					reason  string
 					message string
 				}{
-					{capiv1.NodeStartupTimeoutReason, "Node failed to report NodeReady condition within 20m0s"},
-					{capiv1.NodeStartupTimeoutReason, "Node failed to report NodeReady condition within 20m0s"},
-					{capiv1.MachineHasFailureReason, "Machine has FailureReason: InsufficientCapacity"},
-					{capiv1.MachineHasFailureReason, "Machine has FailureMessage: i-0abc123def456 is in terminated state"},
+					{capiv1.NodeStartupTimeoutV1Beta1Reason, "Node failed to report NodeReady condition within 20m0s"},
+					{capiv1.NodeStartupTimeoutV1Beta1Reason, "Node failed to report NodeReady condition within 20m0s"},
+					{capiv1.MachineHasFailureV1Beta1Reason, "Machine has FailureReason: InsufficientCapacity"},
+					{capiv1.MachineHasFailureV1Beta1Reason, "Machine has FailureMessage: i-0abc123def456 is in terminated state"},
 					{"InstanceTerminated", "i-0abc123def456 instance is in terminated state"},
 					{"InstanceTerminated", "i-0def456abc789 instance is in terminated state"},
 					{"InstanceProvisionFailed", "failed to create instance: InsufficientInstanceCapacity: We currently do not have sufficient capacity in the Availability Zone you requested"},
 					{"InstanceProvisionFailed", "failed to create instance: Unsupported: The requested configuration is currently not supported"},
-					{capiv1.WaitingForInfrastructureFallbackReason, ""},
-					{capiv1.WaitingForInfrastructureFallbackReason, ""},
+					{capiv1.WaitingForInfrastructureFallbackV1Beta1Reason, ""},
+					{capiv1.WaitingForInfrastructureFallbackV1Beta1Reason, ""},
 				}
 				for i := range 10 {
 					machines[i] = &capiv1.Machine{
@@ -1984,16 +1984,16 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:    capiv1.ReadyCondition,
-									Status:  corev1.ConditionFalse,
+									Status:  metav1.ConditionFalse,
 									Reason:  failureReasons[i].reason,
 									Message: failureReasons[i].message,
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -2009,14 +2009,14 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 						},
@@ -2055,14 +2055,14 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 							Addresses: capiv1.MachineAddresses{
@@ -2112,14 +2112,14 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							},
 						},
 						Status: capiv1.MachineStatus{
-							Conditions: []capiv1.Condition{
+							Conditions: []metav1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 								{
 									Type:   capiv1.MachineNodeHealthyCondition,
-									Status: corev1.ConditionTrue,
+									Status: metav1.ConditionTrue,
 								},
 							},
 							Addresses: capiv1.MachineAddresses{
@@ -2216,14 +2216,14 @@ func TestTruncateReasons(t *testing.T) {
 	}{
 		{
 			name:         "When reasons fit within limit it should return them unchanged",
-			reasons:      []string{capiv1.MachineHasFailureReason, capiv1.NodeConditionsFailedReason, capiv1.WaitingForNodeRefReason},
-			expectSuffix: capiv1.WaitingForNodeRefReason,
+			reasons:      []string{capiv1.MachineHasFailureV1Beta1Reason, capiv1.NodeConditionsFailedV1Beta1Reason, capiv1.WaitingForNodeRefV1Beta1Reason},
+			expectSuffix: capiv1.WaitingForNodeRefV1Beta1Reason,
 			expectMaxLen: maxReasonLength,
 		},
 		{
 			name:         "When a single reason fits within limit it should return it unchanged",
-			reasons:      []string{capiv1.ExternalRemediationRequestCreationFailedReason},
-			expectSuffix: capiv1.ExternalRemediationRequestCreationFailedReason,
+			reasons:      []string{capiv1.ExternalRemediationRequestCreationFailedV1Beta1Reason},
+			expectSuffix: capiv1.ExternalRemediationRequestCreationFailedV1Beta1Reason,
 			expectMaxLen: maxReasonLength,
 		},
 		{
@@ -2234,40 +2234,40 @@ func TestTruncateReasons(t *testing.T) {
 		{
 			name: "When many CAPI reasons exceed limit it should truncate with ReasonsTruncated suffix",
 			reasons: []string{
-				capiv1.WaitingForInfrastructureFallbackReason,
-				capiv1.MachineHasFailureReason,
-				capiv1.DeletingReason,
-				capiv1.DeletionFailedReason,
-				capiv1.DrainingReason,
-				capiv1.DrainingFailedReason,
-				capiv1.WaitingForVolumeDetachReason,
-				capiv1.WaitingExternalHookReason,
-				capiv1.PreflightCheckFailedReason,
-				capiv1.MachineCreationFailedReason,
-				capiv1.ScalingUpReason,
-				capiv1.ScalingDownReason,
-				capiv1.WaitingForDataSecretFallbackReason,
-				capiv1.WaitingForControlPlaneFallbackReason,
-				capiv1.WaitingForControlPlaneAvailableReason,
-				capiv1.BootstrapTemplateCloningFailedReason,
-				capiv1.InfrastructureTemplateCloningFailedReason,
-				capiv1.IncorrectExternalRefReason,
-				capiv1.RemediationFailedReason,
-				capiv1.RemediationInProgressReason,
-				capiv1.WaitingForRemediationReason,
-				capiv1.NodeStartupTimeoutReason,
-				capiv1.WaitingForNodeRefReason,
-				capiv1.NodeProvisioningReason,
-				capiv1.NodeNotFoundReason,
-				capiv1.NodeConditionsFailedReason,
-				capiv1.NodeInspectionFailedReason,
-				capiv1.UnhealthyNodeConditionReason,
-				capiv1.HasRemediateMachineAnnotationReason,
-				capiv1.TooManyUnhealthyReason,
-				capiv1.ExternalRemediationTemplateNotFoundReason,
-				capiv1.ExternalRemediationRequestCreationFailedReason,
-				capiv1.WaitingForControlPlaneProviderInitializedReason,
-				capiv1.MissingNodeRefReason,
+				capiv1.WaitingForInfrastructureFallbackV1Beta1Reason,
+				capiv1.MachineHasFailureV1Beta1Reason,
+				capiv1.DeletingV1Beta1Reason,
+				capiv1.DeletionFailedV1Beta1Reason,
+				capiv1.DrainingV1Beta1Reason,
+				capiv1.DrainingFailedV1Beta1Reason,
+				capiv1.WaitingForVolumeDetachV1Beta1Reason,
+				capiv1.WaitingExternalHookV1Beta1Reason,
+				capiv1.PreflightCheckFailedV1Beta1Reason,
+				capiv1.MachineCreationFailedV1Beta1Reason,
+				capiv1.ScalingUpV1Beta1Reason,
+				capiv1.ScalingDownV1Beta1Reason,
+				capiv1.WaitingForDataSecretFallbackV1Beta1Reason,
+				capiv1.WaitingForControlPlaneFallbackV1Beta1Reason,
+				capiv1.WaitingForControlPlaneAvailableV1Beta1Reason,
+				capiv1.BootstrapTemplateCloningFailedV1Beta1Reason,
+				capiv1.InfrastructureTemplateCloningFailedV1Beta1Reason,
+				capiv1.IncorrectExternalRefV1Beta1Reason,
+				capiv1.RemediationFailedV1Beta1Reason,
+				capiv1.RemediationInProgressV1Beta1Reason,
+				capiv1.WaitingForRemediationV1Beta1Reason,
+				capiv1.NodeStartupTimeoutV1Beta1Reason,
+				capiv1.WaitingForNodeRefV1Beta1Reason,
+				capiv1.NodeProvisioningV1Beta1Reason,
+				capiv1.NodeNotFoundV1Beta1Reason,
+				capiv1.NodeConditionsFailedV1Beta1Reason,
+				capiv1.NodeInspectionFailedV1Beta1Reason,
+				capiv1.UnhealthyNodeConditionV1Beta1Reason,
+				capiv1.HasRemediateMachineAnnotationV1Beta1Reason,
+				capiv1.TooManyUnhealthyV1Beta1Reason,
+				capiv1.ExternalRemediationTemplateNotFoundV1Beta1Reason,
+				capiv1.ExternalRemediationRequestCreationFailedV1Beta1Reason,
+				capiv1.WaitingForControlPlaneProviderInitializedV1Beta1Reason,
+				capiv1.MissingNodeRefV1Beta1Reason,
 				// Realistic cloud-provider reasons (CAPA/CAPZ).
 				"InstanceTerminated",
 				"InstanceProvisionFailed",
@@ -2305,6 +2305,123 @@ func TestTruncateReasons(t *testing.T) {
 	}
 }
 
+func TestAggregateMachineMessages(t *testing.T) {
+	shortMsg := "machine is unhealthy\n"
+	// Build a message that is exactly (1000 - len(shortMsg)) chars so the total is exactly 1000.
+	padLen := maxMessageLength - len(shortMsg)
+	paddedMsg := strings.Repeat("x", padLen-1) + "\n"
+
+	for _, tc := range []struct {
+		name   string
+		msgs   []string
+		expect string
+	}{
+		{
+			name:   "When input is nil it should return empty string",
+			msgs:   nil,
+			expect: "",
+		},
+		{
+			name:   "When input is empty it should return empty string",
+			msgs:   []string{},
+			expect: "",
+		},
+		{
+			name:   "When a single short message is given it should return it verbatim",
+			msgs:   []string{shortMsg},
+			expect: shortMsg,
+		},
+		{
+			name:   "When multiple messages fit within limit it should return them all concatenated",
+			msgs:   []string{"error one\n", "error two\n", "error three\n"},
+			expect: "error one\nerror two\nerror three\n",
+		},
+		{
+			name:   "When messages exactly hit the 1000-char boundary it should include all without truncation",
+			msgs:   []string{paddedMsg, shortMsg},
+			expect: paddedMsg + shortMsg,
+		},
+		{
+			name:   "When messages exceed the 1000-char limit it should truncate and append suffix",
+			msgs:   []string{paddedMsg, shortMsg, "this overflows\n"},
+			expect: paddedMsg + shortMsg + endOfMessage,
+		},
+		{
+			name:   "When a single message is exactly maxMessageLength it should be included",
+			msgs:   []string{strings.Repeat("z", maxMessageLength)},
+			expect: strings.Repeat("z", maxMessageLength),
+		},
+		{
+			name:   "When a single message exceeds the limit it should truncate the message preserving the prefix",
+			msgs:   []string{strings.Repeat("a", maxMessageLength+1)},
+			expect: strings.Repeat("a", maxMessageLength-len(endOfGlobalMessage)) + endOfGlobalMessage,
+		},
+		{
+			// Regression test for OCPBUGS-115468: a single Azure Policy denial message
+			// (RequestDisallowedByPolicy) exceeds 1000 chars. The old code dropped it
+			// entirely, returning only the "... message truncated" placeholder.
+			// The fix should truncate the message, preserving the actionable prefix
+			// (error code, policy name, denied location).
+			name: "When a single long Azure RequestDisallowedByPolicy error exceeds the limit it should truncate preserving the actionable prefix",
+			msgs: []string{
+				"Machine oshr-cluster-oshr-new-den-mr7p4-5vslw: Failed: " +
+					"virtualmachine failed to create or update. err: failed to create or update resource " +
+					"oshr-mrg/oshr-cluster-oshr-new-den-mr7p4-5vslw (service: virtualmachine): " +
+					"PUT https://management.azure.com/subscriptions/1d3378d3-5a3f-4712-85a1-2485495dfc4b/resourceGroups/oshr-mrg/providers/Microsoft.Compute/virtualMachines/oshr-cluster-oshr-new-den-mr7p4-5vslw\n" +
+					"--------------------------------------------------------------------------------\n" +
+					"RESPONSE 403: 403 Forbidden\n" +
+					"ERROR CODE: RequestDisallowedByPolicy\n" +
+					"--------------------------------------------------------------------------------\n" +
+					`{"error":{"code":"RequestDisallowedByPolicy","target":"oshr-cluster-oshr-new-den-mr7p4-5vslw",` +
+					`"message":"Resource 'oshr-cluster-oshr-new-den-mr7p4-5vslw' was disallowed by policy. ` +
+					`Policy identifiers: '[{\"policyAssignment\":{\"name\":\"deny-vm-regions-test-assign-mrg\",` +
+					`\"id\":\"/subscriptions/1d3378d3-5a3f-4712-85a1-2485495dfc4b/resourceGroups/oshr-mrg/providers/Microsoft.Authorization/policyAssignments/deny-vm-regions-test-assign-mrg\"},` +
+					`\"policyDefinition\":{\"name\":\"Deny VMs outside allowed regions (test)\",` +
+					`\"id\":\"/subscriptions/1d3378d3-5a3f-4712-85a1-2485495dfc4b/providers/Microsoft.Authorization/policyDefinitions/deny-vm-regions-test\",\"version\":\"1.0.0\"}}]'.","additionalInfo":` +
+					`[{"type":"PolicyViolation","info":{"evaluationDetails":{"evaluatedExpressions":[{"result":"True","expressionKind":"Field","expression":"type","path":"type",` +
+					`"expressionValue":"Microsoft.Compute/virtualMachines","targetValue":"Microsoft.Compute/virtualMachines","operator":"Equals"},` +
+					`{"result":"True","expressionKind":"Field","expression":"location","path":"location","expressionValue":"westus3","targetValue":["eastus"],"operator":"NotIn"}]},` +
+					`"policyDefinitionId":"/subscriptions/1d3378d3-5a3f-4712-85a1-2485495dfc4b/providers/Microsoft.Authorization/policyDefinitions/deny-vm-regions-test",` +
+					`"policyDefinitionName":"deny-vm-regions-test","policyDefinitionDisplayName":"Deny VMs outside allowed regions (test)","policyDefinitionVersion":"1.0.0",` +
+					`"policyDefinitionEffect":"deny","policyAssignmentId":"/subscriptions/1d3378d3-5a3f-4712-85a1-2485495dfc4b/resourceGroups/oshr-mrg/providers/Microsoft.Authorization/policyAssignments/deny-vm-regions-test-assign-mrg",` +
+					`"policyAssignmentName":"deny-vm-regions-test-assign-mrg","policyAssignmentScope":"/subscriptions/1d3378d3-5a3f-4712-85a1-2485495dfc4b/resourceGroups/oshr-mrg",` +
+					`"policyAssignmentParameters":{},"policyExemptionIds":[],"policyEnrollmentIds":[]}}}]}}` + "\n",
+			},
+			expect: func() string {
+				msg := "Machine oshr-cluster-oshr-new-den-mr7p4-5vslw: Failed: " +
+					"virtualmachine failed to create or update. err: failed to create or update resource " +
+					"oshr-mrg/oshr-cluster-oshr-new-den-mr7p4-5vslw (service: virtualmachine): " +
+					"PUT https://management.azure.com/subscriptions/1d3378d3-5a3f-4712-85a1-2485495dfc4b/resourceGroups/oshr-mrg/providers/Microsoft.Compute/virtualMachines/oshr-cluster-oshr-new-den-mr7p4-5vslw\n" +
+					"--------------------------------------------------------------------------------\n" +
+					"RESPONSE 403: 403 Forbidden\n" +
+					"ERROR CODE: RequestDisallowedByPolicy\n" +
+					"--------------------------------------------------------------------------------\n" +
+					`{"error":{"code":"RequestDisallowedByPolicy","target":"oshr-cluster-oshr-new-den-mr7p4-5vslw",` +
+					`"message":"Resource 'oshr-cluster-oshr-new-den-mr7p4-5vslw' was disallowed by policy. ` +
+					`Policy identifiers: '[{\"policyAssignment\":{\"name\":\"deny-vm-regions-test-assign-mrg\",` +
+					`\"id\":\"/subscriptions/1d3378d3-5a3f-4712-85a1-2485495dfc4b/resourceGroups/oshr-mrg/providers/Microsoft.Authorization/policyAssignments/deny-vm-regions-test-assign-mrg\"},` +
+					`\"policyDefinition\":{\"name\":\"Deny VMs outside allowed regions (test)\",` +
+					`\"id\":\"/subscriptions/1d3378d3-5a3f-4712-85a1-2485495dfc4b/providers/Microsoft.Authorization/policyDefinitions/deny-vm-regions-test\",\"version\":\"1.0.0\"}}]'.","additionalInfo":` +
+					`[{"type":"PolicyViolation","info":{"evaluationDetails":{"evaluatedExpressions":[{"result":"True","expressionKind":"Field","expression":"type","path":"type",` +
+					`"expressionValue":"Microsoft.Compute/virtualMachines","targetValue":"Microsoft.Compute/virtualMachines","operator":"Equals"},` +
+					`{"result":"True","expressionKind":"Field","expression":"location","path":"location","expressionValue":"westus3","targetValue":["eastus"],"operator":"NotIn"}]},` +
+					`"policyDefinitionId":"/subscriptions/1d3378d3-5a3f-4712-85a1-2485495dfc4b/providers/Microsoft.Authorization/policyDefinitions/deny-vm-regions-test",` +
+					`"policyDefinitionName":"deny-vm-regions-test","policyDefinitionDisplayName":"Deny VMs outside allowed regions (test)","policyDefinitionVersion":"1.0.0",` +
+					`"policyDefinitionEffect":"deny","policyAssignmentId":"/subscriptions/1d3378d3-5a3f-4712-85a1-2485495dfc4b/resourceGroups/oshr-mrg/providers/Microsoft.Authorization/policyAssignments/deny-vm-regions-test-assign-mrg",` +
+					`"policyAssignmentName":"deny-vm-regions-test-assign-mrg","policyAssignmentScope":"/subscriptions/1d3378d3-5a3f-4712-85a1-2485495dfc4b/resourceGroups/oshr-mrg",` +
+					`"policyAssignmentParameters":{},"policyExemptionIds":[],"policyEnrollmentIds":[]}}}]}}` + "\n"
+				return msg[:maxMessageLength-len(endOfGlobalMessage)] + endOfGlobalMessage
+			}(),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			result := aggregateMachineMessages(tc.msgs)
+			g.Expect(result).To(Equal(tc.expect))
+		})
+	}
+}
+
 func TestAggregateMachineReasonsAndMessages(t *testing.T) {
 	g := NewWithT(t)
 
@@ -2322,30 +2439,30 @@ func TestAggregateMachineReasonsAndMessages(t *testing.T) {
 		{
 			name: "When a single machine fails it should return its reason and message",
 			messageMap: map[string][]string{
-				capiv1.NodeConditionsFailedReason: {
+				capiv1.NodeConditionsFailedV1Beta1Reason: {
 					"Machine machine-0: NodeConditionsFailed: Condition Ready on node is reporting status False\n",
 				},
 			},
 			numMachines:    3,
 			numNotReady:    1,
 			state:          aggregatorMachineStateHealthy,
-			expectReason:   capiv1.NodeConditionsFailedReason,
+			expectReason:   capiv1.NodeConditionsFailedV1Beta1Reason,
 			expectMessages: []string{"1 of 3 machines are not healthy", "Machine machine-0: NodeConditionsFailed: Condition Ready on node is reporting status False"},
 		},
 		{
 			name: "When machines fail with two reasons it should join reasons with comma",
 			messageMap: map[string][]string{
-				capiv1.MachineHasFailureReason: {
+				capiv1.MachineHasFailureV1Beta1Reason: {
 					"Machine machine-0: MachineHasFailure: Machine has FailureReason: InsufficientCapacity\n",
 				},
-				capiv1.WaitingForInfrastructureFallbackReason: {
+				capiv1.WaitingForInfrastructureFallbackV1Beta1Reason: {
 					"Machine machine-1: WaitingForInfrastructure\n",
 				},
 			},
 			numMachines:    5,
 			numNotReady:    2,
 			state:          aggregatorMachineStateReady,
-			expectReason:   capiv1.MachineHasFailureReason + "," + capiv1.WaitingForInfrastructureFallbackReason,
+			expectReason:   capiv1.MachineHasFailureV1Beta1Reason + "," + capiv1.WaitingForInfrastructureFallbackV1Beta1Reason,
 			expectMessages: []string{"2 of 5 machines are not ready", "Machine machine-0: MachineHasFailure", "Machine machine-1: WaitingForInfrastructure"},
 		},
 		{
@@ -2356,13 +2473,13 @@ func TestAggregateMachineReasonsAndMessages(t *testing.T) {
 					msgs[i] = fmt.Sprintf("Machine machine-%d: MachineHasFailure: Machine has FailureMessage: i-%012d is in terminated state\n", i, i)
 				}
 				return map[string][]string{
-					capiv1.MachineHasFailureReason: msgs,
+					capiv1.MachineHasFailureV1Beta1Reason: msgs,
 				}
 			}(),
 			numMachines:    30,
 			numNotReady:    30,
 			state:          aggregatorMachineStateReady,
-			expectReason:   capiv1.MachineHasFailureReason,
+			expectReason:   capiv1.MachineHasFailureV1Beta1Reason,
 			expectMessages: []string{"30 of 30 machines are not ready", "Machine machine-0: MachineHasFailure", endOfMessage},
 		},
 		{
@@ -2371,16 +2488,16 @@ func TestAggregateMachineReasonsAndMessages(t *testing.T) {
 				m := make(map[string][]string)
 				// 10 distinct reasons, each with 20 machines producing ~1000 char blocks.
 				reasons := []string{
-					capiv1.MachineHasFailureReason,
-					capiv1.NodeConditionsFailedReason,
-					capiv1.WaitingForInfrastructureFallbackReason,
-					capiv1.DeletingReason,
-					capiv1.DrainingReason,
-					capiv1.NodeStartupTimeoutReason,
-					capiv1.WaitingForNodeRefReason,
-					capiv1.RemediationInProgressReason,
-					capiv1.PreflightCheckFailedReason,
-					capiv1.MachineCreationFailedReason,
+					capiv1.MachineHasFailureV1Beta1Reason,
+					capiv1.NodeConditionsFailedV1Beta1Reason,
+					capiv1.WaitingForInfrastructureFallbackV1Beta1Reason,
+					capiv1.DeletingV1Beta1Reason,
+					capiv1.DrainingV1Beta1Reason,
+					capiv1.NodeStartupTimeoutV1Beta1Reason,
+					capiv1.WaitingForNodeRefV1Beta1Reason,
+					capiv1.RemediationInProgressV1Beta1Reason,
+					capiv1.PreflightCheckFailedV1Beta1Reason,
+					capiv1.MachineCreationFailedV1Beta1Reason,
 				}
 				longMsg := strings.Repeat("x", 80)
 				machineIdx := 0
@@ -2403,7 +2520,7 @@ func TestAggregateMachineReasonsAndMessages(t *testing.T) {
 		{
 			name: "When messages within a reason are unsorted it should sort them deterministically",
 			messageMap: map[string][]string{
-				capiv1.NodeConditionsFailedReason: {
+				capiv1.NodeConditionsFailedV1Beta1Reason: {
 					"Machine machine-2: NodeConditionsFailed: Condition MemoryPressure is True\n",
 					"Machine machine-0: NodeConditionsFailed: Condition Ready is False\n",
 					"Machine machine-1: NodeConditionsFailed: Condition DiskPressure is True\n",
@@ -2412,7 +2529,7 @@ func TestAggregateMachineReasonsAndMessages(t *testing.T) {
 			numMachines:  5,
 			numNotReady:  3,
 			state:        aggregatorMachineStateHealthy,
-			expectReason: capiv1.NodeConditionsFailedReason,
+			expectReason: capiv1.NodeConditionsFailedV1Beta1Reason,
 			// After sorting, machine-0 should come first, then machine-1, then machine-2.
 			expectMessages: []string{
 				"3 of 5 machines are not healthy",
@@ -2677,7 +2794,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 		expect   bool
 	}{
 		{
-			name: "supported arch and platform used",
+			name: "When supported arch and platform are used, it should validate successfully",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -2689,7 +2806,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "supported arch and platform used - s390x",
+			name: "When s390x arch and supported platform are used, it should validate successfully",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -2701,7 +2818,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "supported platform with multiple arch baremetal - arm64",
+			name: "When arm64 arch is used on baremetal platform, it should validate successfully",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -2713,7 +2830,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "supported platform with multiple arch - amd64",
+			name: "When amd64 arch is used on AWS platform, it should validate successfully",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -2725,7 +2842,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "supported platform with multiple arch - ppc64le",
+			name: "When ppc64le arch is used on None platform, it should validate successfully",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -2737,7 +2854,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "supported platform with multiple arch baremetal - arm64",
+			name: "When arm64 arch is used on agent platform, it should validate successfully",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -2749,7 +2866,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "supported platform with multiple arch baremetal - amd64",
+			name: "When amd64 arch is used on agent platform, it should validate successfully",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -2761,7 +2878,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "unsupported arch and platform used",
+			name: "When unsupported arch and platform are used, it should fail validation",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -2783,7 +2900,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 	}
 }
 
-func Test_validateHCPayloadSupportsNodePoolCPUArch(t *testing.T) {
+func TestValidateHCPayloadSupportsNodePoolCPUArch(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {
 		name        string
@@ -2792,7 +2909,7 @@ func Test_validateHCPayloadSupportsNodePoolCPUArch(t *testing.T) {
 		expectedErr bool
 	}{
 		{
-			name: "payload is multi",
+			name: "When payload is multi-arch, it should validate successfully",
 			hc: &hyperv1.HostedCluster{
 				Status: hyperv1.HostedClusterStatus{
 					PayloadArch: hyperv1.Multi,
@@ -2801,7 +2918,7 @@ func Test_validateHCPayloadSupportsNodePoolCPUArch(t *testing.T) {
 			expectedErr: false,
 		},
 		{
-			name: "payload is amd64; np is amd64",
+			name: "When payload is amd64 and nodepool is amd64, it should validate successfully",
 			hc: &hyperv1.HostedCluster{
 				Status: hyperv1.HostedClusterStatus{
 					PayloadArch: hyperv1.AMD64,
@@ -2815,7 +2932,7 @@ func Test_validateHCPayloadSupportsNodePoolCPUArch(t *testing.T) {
 			expectedErr: false,
 		},
 		{
-			name: "payload is amd64; np is arm64",
+			name: "When payload is amd64 and nodepool is arm64, it should fail validation",
 			hc: &hyperv1.HostedCluster{
 				Status: hyperv1.HostedClusterStatus{
 					PayloadArch: hyperv1.AMD64,
@@ -3225,7 +3342,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 		expectedError     string
 	}{
 		{
-			name: "when nodePool version matches control plane version it should report valid condition",
+			name: "When nodePool version matches control plane version, it should report valid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.18.5-x86_64"
@@ -3245,7 +3362,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when nodePool version is higher than control plane version it should report invalid condition",
+			name: "When nodePool version is higher than control plane version, it should report invalid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.19.0-x86_64"
@@ -3265,7 +3382,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when nodePool version is two minor versions lower than control plane (odd version) it should report valid condition with n-3 support",
+			name: "When nodePool version is two minor versions lower than control plane (odd version), it should report valid condition with n-3 support",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.15.0-x86_64"
@@ -3289,7 +3406,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when nodePool version is two minor versions lower than control plane (even version) it should report valid condition",
+			name: "When nodePool version is two minor versions lower than control plane (even version), it should report valid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.16.0-x86_64"
@@ -3313,7 +3430,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when hosted cluster version history is empty it should report valid condition",
+			name: "When hosted cluster version history is empty, it should report valid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.18.5-x86_64"
@@ -3340,7 +3457,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when nodePool version is three minor versions lower (n-3) it should report valid condition",
+			name: "When nodePool version is three minor versions lower (n-3), it should report valid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.15.0-x86_64"
@@ -3364,7 +3481,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when nodePool version is four minor versions lower (n-4) it should report invalid condition",
+			name: "When nodePool version is four minor versions lower (n-4), it should report invalid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64"
@@ -3388,7 +3505,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when nodePool patch version is lower than control plane (same minor version) it should report valid condition",
+			name: "When nodePool patch version is lower than control plane (same minor version), it should report valid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.18.5-x86_64"
@@ -3412,7 +3529,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when nodePool patch version is higher than control plane (same minor version) it should report invalid condition",
+			name: "When nodePool patch version is higher than control plane (same minor version), it should report invalid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.18.10-x86_64"
@@ -3482,7 +3599,7 @@ func TestNodePoolReconciler_reconcile(t *testing.T) {
 		wantErr  bool
 	}{
 		{
-			name: "when NodePool and HostedCluster are valid it should reconcile successfully",
+			name: "When NodePool and HostedCluster are valid, it should reconcile successfully",
 			hcluster: &hyperv1.HostedCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-hc",
@@ -3530,7 +3647,7 @@ func TestNodePoolReconciler_reconcile(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "when reconciling it should set conditions in the expected order",
+			name: "When reconciling, it should set conditions in the expected order",
 			hcluster: &hyperv1.HostedCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-hc",
@@ -3578,7 +3695,7 @@ func TestNodePoolReconciler_reconcile(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "when ignition endpoint is missing it should exit early from condition loop",
+			name: "When ignition endpoint is missing, it should exit early from condition loop",
 			hcluster: &hyperv1.HostedCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-hc",
@@ -3678,7 +3795,7 @@ func TestNodePoolReconciler_reconcile(t *testing.T) {
 			g.Expect(got).To(Equal(tt.want))
 
 			// For the condition order test, verify conditions are set in the expected order
-			if tt.name == "when reconciling it should set conditions in the expected order" {
+			if tt.name == "When reconciling, it should set conditions in the expected order" {
 				// Expected condition order based on reconcile() signalConditions array
 				expectedConditionOrder := []string{
 					hyperv1.NodePoolAutoscalingEnabledConditionType,
@@ -3719,7 +3836,7 @@ func TestNodePoolReconciler_reconcile(t *testing.T) {
 			}
 
 			// For the early exit test, verify the function exited early from the condition loop
-			if tt.name == "when ignition endpoint is missing it should exit early from condition loop" {
+			if tt.name == "When ignition endpoint is missing, it should exit early from condition loop" {
 				// Verify IgnitionEndpointAvailable condition is set to False
 				ignitionCondition := FindStatusCondition(tt.nodePool.Status.Conditions, string(hyperv1.IgnitionEndpointAvailable))
 				g.Expect(ignitionCondition).NotTo(BeNil(), "IgnitionEndpointAvailable condition should be set")

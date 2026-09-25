@@ -6,6 +6,7 @@ import (
 	"time"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -66,25 +67,28 @@ func (hcu *HealthCheckUpdater) update(ctx context.Context) error {
 		return fmt.Errorf("failed to get HostedControlPlane: %w", err)
 	}
 
-	// Return early if deleting
-	if !hostedControlPlane.DeletionTimestamp.IsZero() {
-		return nil
-	}
-
 	originalHostedControlPlane := hostedControlPlane.DeepCopy()
 
 	errs := []error{}
 
-	// Call generic health checks
-
-	// Call platform-specific health checks
+	// NOTE: generic health checks (if added in the future) should be gated
+	// behind hostedControlPlane.DeletionTimestamp.IsZero(). Platform-specific
+	// credential checks below must keep running during deletion so that
+	// shouldCleanupCloudResources() sees an up-to-date ValidAWSIdentityProvider
+	// condition.
 	if hostedControlPlane.Spec.Platform.Type == hyperv1.AWSPlatform {
 		// This is the best effort ping to the identity provider
 		// that enables access from the operator to the cloud provider resources.
-		if err := awsHealthCheckIdentityProvider(ctx, hostedControlPlane); err != nil {
+		ec2Client, _ := hostedcontrolplane.GetEC2Client(ctx)
+		if err := awsHealthCheckIdentityProvider(ctx, hostedControlPlane, ec2Client); err != nil {
 			errs = append(errs, err)
 		}
+	}
 
+	if hostedControlPlane.Spec.Platform.Type == hyperv1.GCPPlatform {
+		if err := gcpHealthCheckIdentityProvider(ctx, hostedControlPlane); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	// Update the status

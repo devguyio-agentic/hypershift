@@ -2,10 +2,16 @@ package azure
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	. "github.com/onsi/gomega"
 
@@ -16,10 +22,27 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	azureauth "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/authorization/armauthorization/v2"
 
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/utils/ptr"
 
 	"github.com/go-logr/logr"
 )
+
+type httpClientFunc func(*http.Request) (*http.Response, error)
+
+func (f httpClientFunc) Do(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type trackingReadCloser struct {
+	io.Reader
+	closed bool
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}
 
 // mockRoleAssignmentClient implements roleAssignmentClient for testing.
 type mockRoleAssignmentClient struct {
@@ -95,6 +118,227 @@ func internalServerError() error {
 	}
 }
 
+func TestNewRBACManager(t *testing.T) {
+	t.Run("When a manager is created, it should configure the Graph client", func(t *testing.T) {
+		g := NewWithT(t)
+
+		manager := NewRBACManager("test-subscription", nil)
+
+		g.Expect(manager.subscriptionID).To(Equal("test-subscription"))
+		g.Expect(manager.creds).To(BeNil())
+		g.Expect(manager.graphClient).ToNot(BeNil())
+		g.Expect(manager.graphRetryBackoff).To(Equal(graphRequestBackoff))
+	})
+}
+
+func TestGetObjectIDFromClientID(t *testing.T) {
+	const (
+		clientID = "00000000-0000-0000-0000-000000000001"
+		objectID = "11111111-1111-1111-1111-111111111111"
+	)
+	token := azcore.AccessToken{Token: "test-token"}
+	testBackoff := wait.Backoff{Steps: 2, Duration: time.Millisecond}
+
+	t.Run("When the client ID is invalid, it should return an error without sending a request", func(t *testing.T) {
+		g := NewWithT(t)
+		var attempts int
+		manager := &RBACManager{
+			graphClient: httpClientFunc(func(*http.Request) (*http.Response, error) {
+				attempts++
+				return nil, nil
+			}),
+			graphRetryBackoff: testBackoff,
+		}
+
+		_, err := manager.getObjectIDFromClientID(t.Context(), "not-a-uuid", token)
+
+		g.Expect(err).To(MatchError("invalid client ID format: must be a UUID"))
+		g.Expect(attempts).To(Equal(0))
+	})
+
+	t.Run("When Graph returns one service principal, it should return the object ID", func(t *testing.T) {
+		g := NewWithT(t)
+		manager := &RBACManager{
+			graphClient: httpClientFunc(func(req *http.Request) (*http.Response, error) {
+				g.Expect(req.Method).To(Equal(http.MethodGet))
+				g.Expect(req.URL.String()).To(ContainSubstring("graph.microsoft.com/v1.0/servicePrincipals"))
+				g.Expect(req.URL.Query().Get("$filter")).To(Equal("appId eq '" + clientID + "'"))
+				g.Expect(req.Header.Get("Authorization")).To(Equal("Bearer test-token"))
+				return graphResponse(req, http.StatusOK, `{"value":[{"id":"`+objectID+`"}]}`), nil
+			}),
+			graphRetryBackoff: testBackoff,
+		}
+
+		actualObjectID, err := manager.getObjectIDFromClientID(t.Context(), clientID, token)
+
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actualObjectID).To(Equal(objectID))
+	})
+
+	t.Run("When the first Graph DNS lookup fails, it should retry and return the object ID", func(t *testing.T) {
+		g := NewWithT(t)
+		attempts := 0
+		manager := &RBACManager{
+			graphClient: httpClientFunc(func(req *http.Request) (*http.Response, error) {
+				attempts++
+				if attempts == 1 {
+					return nil, &net.DNSError{
+						Err:  "no such host",
+						Name: "graph.microsoft.com",
+					}
+				}
+				return graphResponse(req, http.StatusOK, `{"value":[{"id":"`+objectID+`"}]}`), nil
+			}),
+			graphRetryBackoff: testBackoff,
+		}
+
+		actualObjectID, err := manager.getObjectIDFromClientID(t.Context(), clientID, token)
+
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actualObjectID).To(Equal(objectID))
+		g.Expect(attempts).To(Equal(2))
+	})
+
+	t.Run("When Graph returns a retryable HTTP status, it should retry and return the object ID", func(t *testing.T) {
+		for _, statusCode := range []int{
+			http.StatusRequestTimeout,
+			http.StatusTooManyRequests,
+			http.StatusInternalServerError,
+			http.StatusBadGateway,
+			http.StatusServiceUnavailable,
+			http.StatusGatewayTimeout,
+		} {
+			t.Run(fmt.Sprintf("When Graph returns HTTP %d, it should retry", statusCode), func(t *testing.T) {
+				g := NewWithT(t)
+				attempts := 0
+				manager := &RBACManager{
+					graphClient: httpClientFunc(func(req *http.Request) (*http.Response, error) {
+						attempts++
+						if attempts == 1 {
+							return graphResponse(req, statusCode, "transient error"), nil
+						}
+						return graphResponse(req, http.StatusOK, `{"value":[{"id":"`+objectID+`"}]}`), nil
+					}),
+					graphRetryBackoff: testBackoff,
+				}
+
+				actualObjectID, err := manager.getObjectIDFromClientID(t.Context(), clientID, token)
+
+				g.Expect(err).ToNot(HaveOccurred())
+				g.Expect(actualObjectID).To(Equal(objectID))
+				g.Expect(attempts).To(Equal(2))
+			})
+		}
+	})
+
+	t.Run("When Graph returns a non-retryable HTTP status, it should return the error without retrying", func(t *testing.T) {
+		g := NewWithT(t)
+		attempts := 0
+		manager := &RBACManager{
+			graphClient: httpClientFunc(func(req *http.Request) (*http.Response, error) {
+				attempts++
+				return graphResponse(req, http.StatusBadRequest, "invalid request"), nil
+			}),
+			graphRetryBackoff: testBackoff,
+		}
+
+		_, err := manager.getObjectIDFromClientID(t.Context(), clientID, token)
+
+		g.Expect(err).To(MatchError("graph API request failed with status 400: invalid request"))
+		g.Expect(attempts).To(Equal(1))
+	})
+
+	t.Run("When Graph returns Retry-After, it should wait before retrying", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx, cancel := context.WithTimeout(t.Context(), 25*time.Millisecond)
+		defer cancel()
+		attempts := 0
+		manager := &RBACManager{
+			graphClient: httpClientFunc(func(req *http.Request) (*http.Response, error) {
+				attempts++
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Header: http.Header{
+						"Retry-After": {"1"},
+					},
+					Body:    io.NopCloser(strings.NewReader("rate limited")),
+					Request: req,
+				}, nil
+			}),
+			graphRetryBackoff: testBackoff,
+		}
+
+		_, err := manager.getObjectIDFromClientID(ctx, clientID, token)
+
+		g.Expect(errors.Is(err, context.DeadlineExceeded)).To(BeTrue())
+		g.Expect(attempts).To(Equal(1))
+	})
+
+	t.Run("When Graph transport retries are exhausted, it should return the network error", func(t *testing.T) {
+		g := NewWithT(t)
+		attempts := 0
+		manager := &RBACManager{
+			graphClient: httpClientFunc(func(*http.Request) (*http.Response, error) {
+				attempts++
+				return nil, &net.OpError{
+					Op:   "dial",
+					Net:  "tcp",
+					Addr: &net.TCPAddr{IP: net.ParseIP("2603:1036:3000:10::80"), Port: 443},
+					Err:  syscall.ENETUNREACH,
+				}
+			}),
+			graphRetryBackoff: testBackoff,
+		}
+
+		_, err := manager.getObjectIDFromClientID(t.Context(), clientID, token)
+
+		g.Expect(err).To(MatchError(ContainSubstring("failed to send Microsoft Graph request after retries")))
+		g.Expect(errors.Is(err, syscall.ENETUNREACH)).To(BeTrue())
+		g.Expect(attempts).To(Equal(2))
+	})
+
+	t.Run("When the context is canceled, it should return the context error without sending a request", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		attempts := 0
+		manager := &RBACManager{
+			graphClient: httpClientFunc(func(*http.Request) (*http.Response, error) {
+				attempts++
+				return nil, nil
+			}),
+			graphRetryBackoff: testBackoff,
+		}
+
+		_, err := manager.getObjectIDFromClientID(ctx, clientID, token)
+
+		g.Expect(errors.Is(err, context.Canceled)).To(BeTrue())
+		g.Expect(attempts).To(Equal(0))
+	})
+
+	t.Run("When the context is canceled after a Graph response, it should close the response body", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		responseBody := &trackingReadCloser{Reader: strings.NewReader(`{"value":[]}`)}
+		manager := &RBACManager{
+			graphClient: httpClientFunc(func(req *http.Request) (*http.Response, error) {
+				cancel()
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       responseBody,
+					Request:    req,
+				}, nil
+			}),
+			graphRetryBackoff: testBackoff,
+		}
+
+		_, err := manager.getObjectIDFromClientID(ctx, clientID, token)
+
+		g.Expect(errors.Is(err, context.Canceled)).To(BeTrue())
+		g.Expect(responseBody.closed).To(BeTrue())
+	})
+}
+
 func TestAssignRole(t *testing.T) {
 	const (
 		subscriptionID = "test-sub-id"
@@ -121,7 +365,7 @@ func TestAssignRole(t *testing.T) {
 		expectErr    bool
 	}{
 		// --- LIST behaviors ---
-		"When LIST finds matching assignment it should skip creation": {
+		"When LIST finds matching assignment, it should skip creation": {
 			listItems: []*azureauth.RoleAssignment{
 				{
 					Properties: &azureauth.RoleAssignmentProperties{
@@ -135,7 +379,7 @@ func TestAssignRole(t *testing.T) {
 			expectCreate: false,
 			expectDelete: false,
 		},
-		"When LIST returns items with nil properties it should skip them and fall through to GET": {
+		"When LIST returns items with nil properties, it should skip them and fall through to GET": {
 			listItems: []*azureauth.RoleAssignment{
 				{Properties: nil},
 				{Properties: &azureauth.RoleAssignmentProperties{
@@ -148,13 +392,13 @@ func TestAssignRole(t *testing.T) {
 			expectCreate: true,
 			expectDelete: false,
 		},
-		"When LIST page returns error it should return error": {
+		"When LIST page returns error, it should return error": {
 			listErr:   internalServerError(),
 			expectErr: true,
 		},
 
 		// --- GET behaviors ---
-		"When GET finds assignment with matching principal and role it should skip creation": {
+		"When GET finds assignment with matching principal and role, it should skip creation": {
 			getResponse: &azureauth.RoleAssignmentsClientGetResponse{
 				RoleAssignment: azureauth.RoleAssignment{
 					Properties: &azureauth.RoleAssignmentProperties{
@@ -166,7 +410,7 @@ func TestAssignRole(t *testing.T) {
 			expectCreate: false,
 			expectDelete: false,
 		},
-		"When GET finds assignment with different principal it should delete stale and create new": {
+		"When GET finds assignment with different principal, it should delete stale and create new": {
 			getResponse: &azureauth.RoleAssignmentsClientGetResponse{
 				RoleAssignment: azureauth.RoleAssignment{
 					Properties: &azureauth.RoleAssignmentProperties{
@@ -177,7 +421,7 @@ func TestAssignRole(t *testing.T) {
 			expectCreate: true,
 			expectDelete: true,
 		},
-		"When GET finds assignment with nil PrincipalID it should delete stale and create new": {
+		"When GET finds assignment with nil PrincipalID, it should delete stale and create new": {
 			getResponse: &azureauth.RoleAssignmentsClientGetResponse{
 				RoleAssignment: azureauth.RoleAssignment{
 					Properties: &azureauth.RoleAssignmentProperties{
@@ -188,7 +432,7 @@ func TestAssignRole(t *testing.T) {
 			expectCreate: true,
 			expectDelete: true,
 		},
-		"When GET finds assignment with nil Properties it should delete stale and create new": {
+		"When GET finds assignment with nil Properties, it should delete stale and create new": {
 			getResponse: &azureauth.RoleAssignmentsClientGetResponse{
 				RoleAssignment: azureauth.RoleAssignment{
 					Properties: nil,
@@ -197,7 +441,7 @@ func TestAssignRole(t *testing.T) {
 			expectCreate: true,
 			expectDelete: true,
 		},
-		"When GET finds stale assignment but delete fails it should return error": {
+		"When GET finds stale assignment but delete fails, it should return error": {
 			getResponse: &azureauth.RoleAssignmentsClientGetResponse{
 				RoleAssignment: azureauth.RoleAssignment{
 					Properties: &azureauth.RoleAssignmentProperties{
@@ -210,34 +454,34 @@ func TestAssignRole(t *testing.T) {
 			expectCreate: false,
 			expectErr:    true,
 		},
-		"When GET returns 404 it should create new assignment": {
+		"When GET returns 404, it should create new assignment": {
 			getErr:       notFoundError(),
 			expectCreate: true,
 			expectDelete: false,
 		},
-		"When GET returns 403 it should fall through to create": {
+		"When GET returns 403, it should fall through to create": {
 			getErr:       forbiddenError(),
 			expectCreate: true,
 			expectDelete: false,
 		},
-		"When GET returns unexpected API error it should return error": {
+		"When GET returns unexpected API error, it should return error": {
 			getErr:    internalServerError(),
 			expectErr: true,
 		},
-		"When GET returns non-API error it should return error": {
+		"When GET returns non-API error, it should return error": {
 			getErr:    fmt.Errorf("network timeout"),
 			expectErr: true,
 		},
 
 		// --- Create behaviors ---
-		"When create returns 409 conflict it should succeed": {
+		"When create returns 409 conflict, it should succeed": {
 			getErr:       notFoundError(),
 			createErr:    conflictError(),
 			expectCreate: true,
 			expectDelete: false,
 			expectErr:    false,
 		},
-		"When create returns unexpected error it should return error": {
+		"When create returns unexpected error, it should return error": {
 			getErr:       notFoundError(),
 			createErr:    internalServerError(),
 			expectCreate: true,
@@ -357,15 +601,15 @@ func TestDeleteRoleAssignmentByName(t *testing.T) {
 		deleteErr   error
 		expectError bool
 	}{
-		"When assignment exists it should delete successfully": {
+		"When assignment exists, it should delete successfully": {
 			deleteErr:   nil,
 			expectError: false,
 		},
-		"When assignment does not exist it should skip gracefully": {
+		"When assignment does not exist, it should skip gracefully": {
 			deleteErr:   notFoundError(),
 			expectError: false,
 		},
-		"When delete fails with unexpected error it should return error": {
+		"When delete fails with unexpected error, it should return error": {
 			deleteErr:   forbiddenError(),
 			expectError: true,
 		},
@@ -452,9 +696,19 @@ func TestCleanupRoleAssignments(t *testing.T) {
 				"should clean up data plane component %s", dp)
 		}
 
-		// All 8 control plane components + 3 data plane components should produce delete calls.
+		// Verify Karpenter role assignments are cleaned up on the cluster RG and VNet RG.
+		for _, kp := range []string{config.KarpenterVM, config.KarpenterNetwork, config.KarpenterMI} {
+			kpName := util.GenerateRoleAssignmentName(infraID, kp, managedRGScope)
+			g.Expect(calls).To(ContainElement(deleteCall{scope: managedRGScope, name: kpName}),
+				"should clean up Karpenter component %s on managed RG", kp)
+		}
+		karpenterVNetName := util.GenerateRoleAssignmentName(infraID, config.KarpenterNetwork, vnetRGScope)
+		g.Expect(calls).To(ContainElement(deleteCall{scope: vnetRGScope, name: karpenterVNetName}),
+			"should clean up Karpenter Network Contributor on vnet scope")
+
+		// All 8 control plane components + 3 data plane components + 3 Karpenter on managed RG + 1 Karpenter on vnet RG.
 		// Exact count depends on GetServicePrincipalScopes; verify at least the minimum.
-		g.Expect(len(calls)).To(BeNumerically(">=", 11),
+		g.Expect(len(calls)).To(BeNumerically(">=", 15),
 			"should delete assignments for all components across their scopes")
 	})
 
@@ -507,4 +761,13 @@ func TestCleanupRoleAssignments(t *testing.T) {
 
 func discardLogger() logr.Logger {
 	return logr.Discard()
+}
+
+func graphResponse(req *http.Request, statusCode int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: statusCode,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}
 }

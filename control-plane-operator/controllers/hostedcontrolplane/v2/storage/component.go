@@ -64,7 +64,23 @@ func NewComponent() component.ControlPlaneComponent {
 			component.WithAdaptFunction(adaptAzureCSIFileSecretProvider),
 			component.WithPredicate(isAroHCP),
 		).
+		WithManifestAdapter(
+			"controller-config.yaml",
+			component.WithAdaptFunction(component.NewGenericControllerConfigAdapter("0.0.0.0:8443", "")),
+		).
+		WithManifestAdapter(
+			"gcp-pd-csi-config.yaml",
+			component.WithAdaptFunction(adaptGCPPDCSIConfig),
+			component.EnableForPlatform(hyperv1.GCPPlatform),
+		).
 		WithDependencies(oapiv2.ComponentName).
+		// Gate the CSO on the HCCO's reconciliation having succeeded so the HCCO
+		// creates the ClusterCSIDriver (with the KMS key when configured) before
+		// the CSO starts. This preserves ordering for all clusters, not only those
+		// with a KMS key set.
+		WithPreconditions(component.Precondition{
+			ConditionType: hyperv1.ConfigOperatorReconciliationSucceeded,
+		}).
 		InjectAvailabilityProberContainer(podspec.AvailabilityProberOpts{
 			KubeconfigVolumeName: "guest-kubeconfig",
 			RequiredAPIs: []schema.GroupVersionKind{
@@ -76,10 +92,7 @@ func NewComponent() component.ControlPlaneComponent {
 }
 
 func isStorageAndCSIManaged(cpContext component.WorkloadContext) (bool, error) {
-	if cpContext.HCP.Spec.Platform.Type == hyperv1.IBMCloudPlatform || cpContext.HCP.Spec.Platform.Type == hyperv1.PowerVSPlatform {
-		return false, nil
-	}
-	return true, nil
+	return component.IsStorageAndCSIManaged(cpContext.HCP.Spec.Platform.Type), nil
 }
 
 func isAroHCP(cpContext component.WorkloadContext) bool {

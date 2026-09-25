@@ -19,6 +19,12 @@ status:
     status: "False"
     type: RolloutComplete
   resources:
+  - group: ""
+    kind: ConfigMap
+    name: cluster-storage-operator-config
+  - group: ""
+    kind: ConfigMap
+    name: gcp-pd-cloud-config
   - group: rbac.authorization.k8s.io
     kind: Role
     name: cluster-storage-operator

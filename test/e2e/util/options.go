@@ -83,6 +83,8 @@ type Options struct {
 	HOInstallationOptions HyperShiftOperatorInstallOptions
 	// RunUpgradeTest is set to run HyperShift Operator upgrade test
 	RunUpgradeTest bool
+	// RunCAPIMigrationTest is set to run CAPI storage version migration test
+	RunCAPIMigrationTest bool
 
 	// external oidc for authentication in spec.configurations
 	ExternalOIDCProvider        string
@@ -100,6 +102,7 @@ type Options struct {
 }
 
 type HyperShiftOperatorInstallOptions struct {
+	Platform                               hyperv1.PlatformType
 	AWSOidcS3BucketName                    string
 	AWSOidcS3Credentials                   string
 	AWSOidcS3Region                        string
@@ -107,6 +110,9 @@ type HyperShiftOperatorInstallOptions struct {
 	AWSPrivateRegion                       string
 	AzurePrivateCredentialsFile            string
 	AzurePLSResourceGroup                  string
+	GCPProject                             string
+	GCPRegion                              string
+	ExternalDNSGoogleProject               string
 	EnableCIDebugOutput                    bool
 	ExternalDNSCredentials                 string
 	ExternalDNSDomain                      string
@@ -119,6 +125,7 @@ type HyperShiftOperatorInstallOptions struct {
 	EnableDedicatedRequestServingIsolation bool
 	EnableCPOOverrides                     bool
 	EnableEtcdRecovery                     bool
+	DisableCAPIMigration                   bool
 	DryRun                                 bool
 	DryRunDir                              string
 }
@@ -522,6 +529,15 @@ func (o *Options) Complete() error {
 
 	if o.ConfigurableClusterOptions.ExternalDNSDomain != "" {
 		o.HOInstallationOptions.ExternalDNSDomain = o.ConfigurableClusterOptions.ExternalDNSDomain
+	}
+
+	o.HOInstallationOptions.Platform = o.Platform
+
+	if o.HOInstallationOptions.GCPProject == "" {
+		o.HOInstallationOptions.GCPProject = o.ConfigurableClusterOptions.GCPProject
+	}
+	if o.HOInstallationOptions.GCPRegion == "" {
+		o.HOInstallationOptions.GCPRegion = o.ConfigurableClusterOptions.GCPRegion
 	}
 
 	return nil

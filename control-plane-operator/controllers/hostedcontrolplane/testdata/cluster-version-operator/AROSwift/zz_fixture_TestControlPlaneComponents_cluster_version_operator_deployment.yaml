@@ -1,6 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    hypershift.openshift.io/desired-state-hash: 8f6e63fbe7ba66535bf94d15b65ec2bde7d0cdcb74808872919e65bd94a155de
   labels:
     hypershift.openshift.io/managed-by: control-plane-operator
   name: cluster-version-operator
@@ -284,6 +286,24 @@ spec:
           kind: Deployment
           metadata:
             name: aws-ebs-csi-driver-controller
+            namespace: openshift-cluster-csi-drivers
+            annotations:
+              include.release.openshift.io/ibm-cloud-managed: "true"
+              release.openshift.io/delete: "true"
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: gcp-pd-csi-driver-operator
+            namespace: openshift-cluster-csi-drivers
+            annotations:
+              include.release.openshift.io/ibm-cloud-managed: "true"
+              release.openshift.io/delete: "true"
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: gcp-pd-csi-driver-controller
             namespace: openshift-cluster-csi-drivers
             annotations:
               include.release.openshift.io/ibm-cloud-managed: "true"

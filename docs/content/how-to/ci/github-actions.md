@@ -29,7 +29,9 @@ This pattern provides:
 
 ## 📋 Workflows
 
-All workflows run on self-hosted ARC runners and target the `main` and `release-4.22` branches.
+The PR validation workflows run on self-hosted ARC runners. Most target `main` and `release-4.22`; only the OCP and vanilla Kubernetes envtest workflows also target `release-5.0`.
+
+Pull request callers resolve their reusable workflows from `main`, while post-merge runs use the reusable workflow stored on the pushed branch. Keep branch-local matrices synchronized with `main`; `release-5.0` envtests must include Kubernetes 1.36 for consistent pull request and post-merge coverage.
 
 ### 🧹 Code Quality
 
@@ -52,7 +54,7 @@ All workflows run on self-hosted ARC runners and target the `main` and `release-
 
 | Caller | Reusable | Purpose |
 |--------|----------|---------|
-| `docs-build.yaml` | `docs-build-reusable.yaml` | Build MkDocs site in strict mode |
+| `docs-build.yaml` | `docs-build-reusable.yaml` | Build Zensical site in strict mode |
 
 !!! info
     The `docs-deploy.yaml` workflow is not a reusable workflow pair — it triggers via `workflow_run` after the Docs Build completes to deploy the preview. See [Documentation Preview](docs-preview.md) for details.
@@ -96,7 +98,7 @@ To add a new GHA workflow:
 
 1. **Create the reusable workflow** (e.g., `my-check-reusable.yaml`) with `on: workflow_call`. This is where all the job logic lives.
 2. **Create the caller workflow** (e.g., `my-check.yaml`) that uses the reusable workflow pinned at `@main`.
-3. Add **branch filters** for `main` and any active release branches (e.g., `release-4.22`).
+3. Add **branch filters** for `main` and each release branch where the workflow is intended to run. Do not assume every workflow should target every release branch.
 4. Use `arc-runner-set` as the runner.
 
 ### Post-merge runs

@@ -2,8 +2,12 @@ package gcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,26 +26,30 @@ import (
 	"github.com/go-logr/logr/testr"
 	"google.golang.org/api/compute/v1"
 	"google.golang.org/api/googleapi"
+	"google.golang.org/api/option"
 )
 
 // fakeComputeClient implements ComputeClient for unit tests.
 // Each field holds the canned return values for the corresponding method.
 // capturedSubnetFilter records the filter string passed to ListSubnetworks so
 // tests can assert that the VPC-scoped filter reaches the API call site.
+// listServiceAttachmentsCallCount tracks how many times ListServiceAttachments
+// is called, used to verify subnet availability is checked via a single API call.
 type fakeComputeClient struct {
-	forwardingRules         []*compute.ForwardingRule
-	forwardingRulesErr      error
-	subnetworks             []*compute.Subnetwork
-	subnetworksErr          error
-	capturedSubnetFilter    string
-	serviceAttachments      []*compute.ServiceAttachment
-	serviceAttachmentsErr   error
-	getServiceAttachment    *compute.ServiceAttachment
-	getServiceAttachmentErr error
-	insertOperation         *compute.Operation
-	insertErr               error
-	deleteOperation         *compute.Operation
-	deleteErr               error
+	forwardingRules                 []*compute.ForwardingRule
+	forwardingRulesErr              error
+	subnetworks                     []*compute.Subnetwork
+	subnetworksErr                  error
+	capturedSubnetFilter            string
+	serviceAttachments              []*compute.ServiceAttachment
+	serviceAttachmentsErr           error
+	listServiceAttachmentsCallCount int
+	getServiceAttachment            *compute.ServiceAttachment
+	getServiceAttachmentErr         error
+	insertOperation                 *compute.Operation
+	insertErr                       error
+	deleteOperation                 *compute.Operation
+	deleteErr                       error
 }
 
 func (f *fakeComputeClient) ListForwardingRules(_ context.Context, _, _, _ string) ([]*compute.ForwardingRule, error) {
@@ -54,6 +62,7 @@ func (f *fakeComputeClient) ListSubnetworks(_ context.Context, _, _, filter stri
 }
 
 func (f *fakeComputeClient) ListServiceAttachments(_ context.Context, _, _ string) ([]*compute.ServiceAttachment, error) {
+	f.listServiceAttachmentsCallCount++
 	return f.serviceAttachments, f.serviceAttachmentsErr
 }
 
@@ -76,36 +85,36 @@ func TestIsNotFoundError(t *testing.T) {
 		expected bool
 	}{
 		{
-			name: "GCP 404 error",
+			name: "When given a GCP 404 error, it should return true",
 			err: &googleapi.Error{
 				Code: 404,
 			},
 			expected: true,
 		},
 		{
-			name: "GCP 400 error",
+			name: "When given a GCP 400 error, it should return false",
 			err: &googleapi.Error{
 				Code: 400,
 			},
 			expected: false,
 		},
 		{
-			name:     "non-GCP error",
+			name:     "When given a non-GCP error, it should return false",
 			err:      errors.New("some other error"),
 			expected: false,
 		},
 		{
-			name:     "nil error",
+			name:     "When given a nil error, it should return false",
 			err:      nil,
 			expected: false,
 		},
 		{
-			name:     "When given a wrapped GCP 404 error it should return true",
+			name:     "When given a wrapped GCP 404 error, it should return true",
 			err:      fmt.Errorf("operation failed: %w", &googleapi.Error{Code: 404}),
 			expected: true,
 		},
 		{
-			name:     "When given a wrapped GCP 500 error it should return false",
+			name:     "When given a wrapped GCP 500 error, it should return false",
 			err:      fmt.Errorf("operation failed: %w", &googleapi.Error{Code: 500}),
 			expected: false,
 		},
@@ -172,7 +181,7 @@ func TestReconcileGCPPrivateServiceConnectSpec(t *testing.T) {
 	}
 }
 
-func TestReconcile_NotFound(t *testing.T) {
+func TestReconcileNotFound(t *testing.T) {
 	client := fake.NewClientBuilder().WithScheme(hyperapi.Scheme).Build()
 
 	r := &GCPPrivateServiceConnectReconciler{
@@ -199,7 +208,7 @@ func TestReconcile_NotFound(t *testing.T) {
 	}
 }
 
-func TestReconcile_PausedUntil(t *testing.T) {
+func TestReconcilePausedUntil(t *testing.T) {
 	// Use a dynamically computed future time so the test remains valid over time
 	pausedUntil := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
 
@@ -281,12 +290,12 @@ func TestIPAddressFilterFormat(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "When filtering by IPv4 address it should use AIP-160 exact match syntax",
+			name:     "When filtering by IPv4 address, it should use AIP-160 exact match syntax",
 			ip:       "10.0.0.1",
 			expected: `IPAddress = "10.0.0.1"`,
 		},
 		{
-			name:     "When filtering by IPv4 address with different octets it should quote properly",
+			name:     "When filtering by IPv4 address with different octets, it should quote properly",
 			ip:       "192.168.1.100",
 			expected: `IPAddress = "192.168.1.100"`,
 		},
@@ -312,7 +321,7 @@ func TestConstructServiceAttachmentName(t *testing.T) {
 		description string
 	}{
 		{
-			name: "When given a cluster ID it should construct valid service attachment name",
+			name: "When given a cluster ID, it should construct valid service attachment name",
 			hc: &hyperv1.HostedCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
 				Spec: hyperv1.HostedClusterSpec{
@@ -345,7 +354,7 @@ func TestNATSubnetFilterFormat(t *testing.T) {
 		expected   string
 	}{
 		{
-			name:       "When given a network URL it should include both purpose and network in the filter",
+			name:       "When given a network URL, it should include both purpose and network in the filter",
 			networkURL: "https://www.googleapis.com/compute/v1/projects/my-project/global/networks/my-vpc",
 			expected:   `purpose = "PRIVATE_SERVICE_CONNECT" AND network = "https://www.googleapis.com/compute/v1/projects/my-project/global/networks/my-vpc"`,
 		},
@@ -384,7 +393,7 @@ func newGCPPSC(forwardingRuleName, natSubnet string) *hyperv1.GCPPrivateServiceC
 
 // --- lookupForwardingRule ---
 
-func TestLookupForwardingRule_APIError(t *testing.T) {
+func TestLookupForwardingRuleAPIError(t *testing.T) {
 	r := newReconciler(t, &fakeComputeClient{forwardingRulesErr: errors.New("GCP unavailable")})
 	rule, err := r.lookupForwardingRule(context.Background(), newGCPPSC("", ""))
 	if err == nil {
@@ -395,7 +404,7 @@ func TestLookupForwardingRule_APIError(t *testing.T) {
 	}
 }
 
-func TestLookupForwardingRule_NoResults(t *testing.T) {
+func TestLookupForwardingRuleNoResults(t *testing.T) {
 	r := newReconciler(t, &fakeComputeClient{forwardingRules: nil})
 	rule, err := r.lookupForwardingRule(context.Background(), newGCPPSC("", ""))
 	if err != nil {
@@ -406,7 +415,7 @@ func TestLookupForwardingRule_NoResults(t *testing.T) {
 	}
 }
 
-func TestLookupForwardingRule_SingleResult(t *testing.T) {
+func TestLookupForwardingRuleSingleResult(t *testing.T) {
 	expected := &compute.ForwardingRule{Name: "fr-1", Network: "https://www.googleapis.com/compute/v1/projects/p/global/networks/my-vpc"}
 	r := newReconciler(t, &fakeComputeClient{forwardingRules: []*compute.ForwardingRule{expected}})
 	rule, err := r.lookupForwardingRule(context.Background(), newGCPPSC("", ""))
@@ -418,7 +427,7 @@ func TestLookupForwardingRule_SingleResult(t *testing.T) {
 	}
 }
 
-func TestLookupForwardingRule_MultipleResults_UsesFirst(t *testing.T) {
+func TestLookupForwardingRuleMultipleResultsUsesFirst(t *testing.T) {
 	rules := []*compute.ForwardingRule{
 		{Name: "fr-first", Network: "https://www.googleapis.com/compute/v1/projects/p/global/networks/my-vpc"},
 		{Name: "fr-second", Network: "https://www.googleapis.com/compute/v1/projects/p/global/networks/my-vpc"},
@@ -435,7 +444,7 @@ func TestLookupForwardingRule_MultipleResults_UsesFirst(t *testing.T) {
 
 // --- reconcileGCPPrivateServiceConnectSpec ---
 
-func TestReconcileSpec_BothFieldsSet_EarlyReturn(t *testing.T) {
+func TestReconcileSpecBothFieldsSetEarlyReturn(t *testing.T) {
 	// GcpClient is nil — proves no GCP call is made when both fields are already set.
 	r := newReconciler(t, nil)
 	gcpPSC := newGCPPSC("existing-rule", "existing-subnet")
@@ -444,7 +453,7 @@ func TestReconcileSpec_BothFieldsSet_EarlyReturn(t *testing.T) {
 	}
 }
 
-func TestReconcileSpec_ForwardingRuleLookupError(t *testing.T) {
+func TestReconcileSpecForwardingRuleLookupError(t *testing.T) {
 	r := newReconciler(t, &fakeComputeClient{forwardingRulesErr: errors.New("api error")})
 	err := r.reconcileGCPPrivateServiceConnectSpec(context.Background(), newGCPPSC("", ""), nil)
 	if err == nil {
@@ -452,7 +461,7 @@ func TestReconcileSpec_ForwardingRuleLookupError(t *testing.T) {
 	}
 }
 
-func TestReconcileSpec_ForwardingRuleNotYetProvisioned(t *testing.T) {
+func TestReconcileSpecForwardingRuleNotYetProvisioned(t *testing.T) {
 	// nil result from lookupForwardingRule — ILB not yet ready, should return nil (requeue).
 	r := newReconciler(t, &fakeComputeClient{forwardingRules: nil})
 	err := r.reconcileGCPPrivateServiceConnectSpec(context.Background(), newGCPPSC("", ""), nil)
@@ -461,7 +470,7 @@ func TestReconcileSpec_ForwardingRuleNotYetProvisioned(t *testing.T) {
 	}
 }
 
-func TestReconcileSpec_ForwardingRuleEmptyNetwork(t *testing.T) {
+func TestReconcileSpecForwardingRuleEmptyNetwork(t *testing.T) {
 	// Forwarding rule exists but has no Network field — cannot scope subnet discovery.
 	r := newReconciler(t, &fakeComputeClient{
 		forwardingRules: []*compute.ForwardingRule{{Name: "fr-1", Network: ""}},
@@ -472,7 +481,7 @@ func TestReconcileSpec_ForwardingRuleEmptyNetwork(t *testing.T) {
 	}
 }
 
-func TestReconcileSpec_SetsForwardingRuleNameAndNATSubnet(t *testing.T) {
+func TestReconcileSpecSetsForwardingRuleNameAndNATSubnet(t *testing.T) {
 	networkURL := "https://www.googleapis.com/compute/v1/projects/p/global/networks/my-vpc"
 	r := newReconciler(t, &fakeComputeClient{
 		forwardingRules: []*compute.ForwardingRule{{Name: "fr-1", Network: networkURL}},
@@ -492,7 +501,7 @@ func TestReconcileSpec_SetsForwardingRuleNameAndNATSubnet(t *testing.T) {
 	}
 }
 
-func TestReconcileSpec_PartialWrite_ForwardingRuleNamePreservedNATSubnetDiscovered(t *testing.T) {
+func TestReconcileSpecPartialWriteForwardingRuleNamePreservedNATSubnetDiscovered(t *testing.T) {
 	// Partial-write edge case: ForwardingRuleName was already written in a previous reconcile
 	// but NATSubnet was not (e.g. discoverNATSubnet failed transiently). The controller must
 	// preserve the existing ForwardingRuleName rather than overwriting it, and still use the
@@ -526,7 +535,7 @@ func TestReconcileSpec_PartialWrite_ForwardingRuleNamePreservedNATSubnetDiscover
 
 // --- discoverNATSubnet ---
 
-func TestDiscoverNATSubnet_APIError(t *testing.T) {
+func TestDiscoverNATSubnetAPIError(t *testing.T) {
 	networkURL := "https://example.com/network"
 	fc := &fakeComputeClient{subnetworksErr: errors.New("api error")}
 	r := newReconciler(t, fc)
@@ -540,7 +549,7 @@ func TestDiscoverNATSubnet_APIError(t *testing.T) {
 	}
 }
 
-func TestDiscoverNATSubnet_NoSubnets(t *testing.T) {
+func TestDiscoverNATSubnetNoSubnets(t *testing.T) {
 	networkURL := "https://example.com/network"
 	fc := &fakeComputeClient{subnetworks: nil}
 	r := newReconciler(t, fc)
@@ -554,7 +563,7 @@ func TestDiscoverNATSubnet_NoSubnets(t *testing.T) {
 	}
 }
 
-func TestDiscoverNATSubnet_SubnetInUse_SkipsToNext(t *testing.T) {
+func TestDiscoverNATSubnetSubnetInUseSkipsToNext(t *testing.T) {
 	networkURL := "https://example.com/network"
 	fc := &fakeComputeClient{
 		subnetworks: []*compute.Subnetwork{
@@ -580,7 +589,7 @@ func TestDiscoverNATSubnet_SubnetInUse_SkipsToNext(t *testing.T) {
 	}
 }
 
-func TestDiscoverNATSubnet_AllSubnetsInUse(t *testing.T) {
+func TestDiscoverNATSubnetAllSubnetsInUse(t *testing.T) {
 	networkURL := "https://example.com/network"
 	fc := &fakeComputeClient{
 		subnetworks: []*compute.Subnetwork{{Name: "only-subnet"}},
@@ -596,5 +605,262 @@ func TestDiscoverNATSubnet_AllSubnetsInUse(t *testing.T) {
 	wantFilter := buildNATSubnetFilter(networkURL)
 	if fc.capturedSubnetFilter != wantFilter {
 		t.Errorf("ListSubnetworks filter = %q, want %q", fc.capturedSubnetFilter, wantFilter)
+	}
+}
+
+func TestDiscoverNATSubnetServiceAttachmentsError(t *testing.T) {
+	networkURL := "https://example.com/network"
+	fc := &fakeComputeClient{
+		subnetworks:           []*compute.Subnetwork{{Name: "subnet-1"}},
+		serviceAttachmentsErr: errors.New("GCP API error"),
+	}
+	r := newReconciler(t, fc)
+	_, err := r.discoverNATSubnet(context.Background(), newGCPPSC("", ""), networkURL)
+	if err == nil {
+		t.Error("expected error when ListServiceAttachments fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to list service attachments") {
+		t.Errorf("expected 'failed to list service attachments' error, got: %v", err)
+	}
+}
+
+// TestDiscoverNATSubnetSingleAPICall verifies that ListServiceAttachments
+// is called only once regardless of how many subnets exist.
+func TestDiscoverNATSubnetSingleAPICall(t *testing.T) {
+	networkURL := "https://example.com/network"
+	fc := &fakeComputeClient{
+		subnetworks: []*compute.Subnetwork{
+			{Name: "subnet-1"},
+			{Name: "subnet-2"},
+			{Name: "subnet-3-available"},
+		},
+		serviceAttachments: []*compute.ServiceAttachment{
+			{NatSubnets: []string{"projects/p/regions/r/subnetworks/subnet-1"}},
+			{NatSubnets: []string{"projects/p/regions/r/subnetworks/subnet-2"}},
+		},
+	}
+
+	r := newReconciler(t, fc)
+	result, err := r.discoverNATSubnet(context.Background(), newGCPPSC("", ""), networkURL)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if result != "subnet-3-available" {
+		t.Errorf("got %q, want 'subnet-3-available'", result)
+	}
+
+	// ListServiceAttachments must be called exactly once, not once per subnet.
+	if fc.listServiceAttachmentsCallCount != 1 {
+		t.Errorf("ListServiceAttachments called %d times, want 1", fc.listServiceAttachmentsCallCount)
+	}
+}
+
+// TestComputeServiceAdapterListServiceAttachmentsPagination verifies that
+// computeServiceAdapter.ListServiceAttachments correctly handles paginated
+// responses from the GCP API by following next-page tokens and returning
+// items from all pages.
+func TestComputeServiceAdapterListServiceAttachmentsPagination(t *testing.T) {
+	ctx := context.Background()
+
+	// Track which pages were requested to verify pagination logic
+	requestedPages := make(map[string]bool)
+
+	// Create a mock HTTP server that simulates GCP API pagination
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only handle service attachment list requests
+		if !strings.Contains(r.URL.Path, "/serviceAttachments") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+
+		pageToken := r.URL.Query().Get("pageToken")
+		requestedPages[pageToken] = true
+
+		var response compute.ServiceAttachmentList
+
+		switch pageToken {
+		case "":
+			// First page: return 2 items + next page token
+			response = compute.ServiceAttachmentList{
+				Items: []*compute.ServiceAttachment{
+					{Name: "sa-page1-item1", NatSubnets: []string{"subnet-1"}},
+					{Name: "sa-page1-item2", NatSubnets: []string{"subnet-2"}},
+				},
+				NextPageToken: "page2-token",
+			}
+		case "page2-token":
+			// Second page: return 2 more items, no next page token (end of results)
+			response = compute.ServiceAttachmentList{
+				Items: []*compute.ServiceAttachment{
+					{Name: "sa-page2-item1", NatSubnets: []string{"subnet-3"}},
+					{Name: "sa-page2-item2", NatSubnets: []string{"subnet-4"}},
+				},
+				NextPageToken: "", // Last page
+			}
+		default:
+			http.Error(w, "invalid page token", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	// Create a real compute service pointing to our mock server
+	svc, err := compute.NewService(ctx, option.WithoutAuthentication(), option.WithEndpoint(server.URL))
+	if err != nil {
+		t.Fatalf("failed to create compute service: %v", err)
+	}
+
+	adapter := &computeServiceAdapter{svc: svc}
+
+	// Call ListServiceAttachments - it should automatically handle pagination
+	result, err := adapter.ListServiceAttachments(ctx, "test-project", "test-region")
+	if err != nil {
+		t.Fatalf("ListServiceAttachments failed: %v", err)
+	}
+
+	// Verify that both pages were requested
+	if !requestedPages[""] {
+		t.Error("first page (empty token) was not requested")
+	}
+	if !requestedPages["page2-token"] {
+		t.Error("second page (page2-token) was not requested")
+	}
+	if len(requestedPages) != 2 {
+		t.Errorf("expected exactly 2 page requests, got %d", len(requestedPages))
+	}
+
+	// Verify all items from both pages are returned
+	if len(result) != 4 {
+		t.Errorf("got %d service attachments, want 4", len(result))
+	}
+
+	expectedNames := map[string]bool{
+		"sa-page1-item1": false,
+		"sa-page1-item2": false,
+		"sa-page2-item1": false,
+		"sa-page2-item2": false,
+	}
+
+	for _, sa := range result {
+		if _, ok := expectedNames[sa.Name]; !ok {
+			t.Errorf("unexpected service attachment: %s", sa.Name)
+		}
+		expectedNames[sa.Name] = true
+	}
+
+	for name, found := range expectedNames {
+		if !found {
+			t.Errorf("missing service attachment: %s", name)
+		}
+	}
+}
+
+// TestComputeServiceAdapterListSubnetworksPagination verifies that
+// computeServiceAdapter.ListSubnetworks correctly handles paginated
+// responses from the GCP API by following next-page tokens and returning
+// items from all pages.
+func TestComputeServiceAdapterListSubnetworksPagination(t *testing.T) {
+	ctx := context.Background()
+
+	// Track which pages were requested to verify pagination logic
+	requestedPages := make(map[string]bool)
+
+	// Create a mock HTTP server that simulates GCP API pagination
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only handle subnetwork list requests
+		if !strings.Contains(r.URL.Path, "/subnetworks") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+
+		pageToken := r.URL.Query().Get("pageToken")
+		requestedPages[pageToken] = true
+
+		var response compute.SubnetworkList
+
+		switch pageToken {
+		case "":
+			// First page: return 2 items + next page token
+			response = compute.SubnetworkList{
+				Items: []*compute.Subnetwork{
+					{Name: "subnet-page1-item1", Purpose: "PRIVATE_SERVICE_CONNECT"},
+					{Name: "subnet-page1-item2", Purpose: "PRIVATE_SERVICE_CONNECT"},
+				},
+				NextPageToken: "page2-token",
+			}
+		case "page2-token":
+			// Second page: return 2 more items, no next page token (end of results)
+			response = compute.SubnetworkList{
+				Items: []*compute.Subnetwork{
+					{Name: "subnet-page2-item1", Purpose: "PRIVATE_SERVICE_CONNECT"},
+					{Name: "subnet-page2-item2", Purpose: "PRIVATE_SERVICE_CONNECT"},
+				},
+				NextPageToken: "", // Last page
+			}
+		default:
+			http.Error(w, "invalid page token", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	// Create a real compute service pointing to our mock server
+	svc, err := compute.NewService(ctx, option.WithoutAuthentication(), option.WithEndpoint(server.URL))
+	if err != nil {
+		t.Fatalf("failed to create compute service: %v", err)
+	}
+
+	adapter := &computeServiceAdapter{svc: svc}
+
+	// Call ListSubnetworks - it should automatically handle pagination
+	result, err := adapter.ListSubnetworks(ctx, "test-project", "test-region", `purpose="PRIVATE_SERVICE_CONNECT"`)
+	if err != nil {
+		t.Fatalf("ListSubnetworks failed: %v", err)
+	}
+
+	// Verify that both pages were requested
+	if !requestedPages[""] {
+		t.Error("first page (empty token) was not requested")
+	}
+	if !requestedPages["page2-token"] {
+		t.Error("second page (page2-token) was not requested")
+	}
+	if len(requestedPages) != 2 {
+		t.Errorf("expected exactly 2 page requests, got %d", len(requestedPages))
+	}
+
+	// Verify all items from both pages are returned
+	if len(result) != 4 {
+		t.Errorf("got %d subnetworks, want 4", len(result))
+	}
+
+	expectedNames := map[string]bool{
+		"subnet-page1-item1": false,
+		"subnet-page1-item2": false,
+		"subnet-page2-item1": false,
+		"subnet-page2-item2": false,
+	}
+
+	for _, subnet := range result {
+		if _, ok := expectedNames[subnet.Name]; !ok {
+			t.Errorf("unexpected subnetwork: %s", subnet.Name)
+		}
+		expectedNames[subnet.Name] = true
+	}
+
+	for name, found := range expectedNames {
+		if !found {
+			t.Errorf("missing subnetwork: %s", name)
+		}
 	}
 }

@@ -14,7 +14,6 @@ import (
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/oapi"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/oauth"
 	routerutil "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/router/util"
-	sharedingress "github.com/openshift/hypershift/hypershift-operator/controllers/sharedingress"
 	"github.com/openshift/hypershift/support/config"
 	"github.com/openshift/hypershift/support/events"
 	"github.com/openshift/hypershift/support/k8sutil"
@@ -247,49 +246,35 @@ func (r *Reconciler) reconcileAPIServerService(ctx context.Context, hcp *hyperv1
 	if serviceStrategy.Type == hyperv1.Route {
 		externalPublicRoute := manifests.KubeAPIServerExternalPublicRoute(hcp.Namespace)
 		externalPrivateRoute := manifests.KubeAPIServerExternalPrivateRoute(hcp.Namespace)
+		hostname := ""
+		if serviceStrategy.Route != nil {
+			hostname = serviceStrategy.Route.Hostname
+		}
 		if netutil.IsPublicHCP(hcp) {
-			// Remove the external private route if it exists
-			err := r.Client.Get(ctx, client.ObjectKeyFromObject(externalPrivateRoute), externalPrivateRoute)
-			if err != nil {
-				if !apierrors.IsNotFound(err) {
-					return fmt.Errorf("failed to check whether apiserver external private route exists: %w", err)
-				}
-			} else {
-				if err := r.Client.Delete(ctx, externalPrivateRoute); err != nil {
-					return fmt.Errorf("failed to delete apiserver external private route: %w", err)
-				}
+			if _, err := k8sutil.DeleteIfNeeded(ctx, r.Client, externalPrivateRoute); err != nil {
+				return err
 			}
-			// Reconcile the external public route
 			if _, err := createOrUpdate(ctx, r.Client, externalPublicRoute, func() error {
-				hostname := ""
-				if serviceStrategy.Route != nil {
-					hostname = serviceStrategy.Route.Hostname
-				}
 				return kas.ReconcileExternalPublicRoute(externalPublicRoute, p.OwnerReference, hostname)
 			}); err != nil {
 				return fmt.Errorf("failed to reconcile apiserver external public route %s: %w", externalPublicRoute.Name, err)
 			}
 		} else {
-			// Remove the external public route if it exists
-			err := r.Client.Get(ctx, client.ObjectKeyFromObject(externalPublicRoute), externalPublicRoute)
-			if err != nil {
-				if !apierrors.IsNotFound(err) {
-					return fmt.Errorf("failed to check whether apiserver external public route exists: %w", err)
+			if _, err := k8sutil.DeleteIfNeeded(ctx, r.Client, externalPublicRoute); err != nil {
+				return err
+			}
+			// Reconcile the external private route only when a hostname is configured.
+			// Private clusters without external DNS (no hostname) use only the internal route.
+			if hostname != "" {
+				if _, err := createOrUpdate(ctx, r.Client, externalPrivateRoute, func() error {
+					return kas.ReconcileExternalPrivateRoute(externalPrivateRoute, p.OwnerReference, hostname)
+				}); err != nil {
+					return fmt.Errorf("failed to reconcile apiserver external private route %s: %w", externalPrivateRoute.Name, err)
 				}
 			} else {
-				if err := r.Client.Delete(ctx, externalPublicRoute); err != nil {
-					return fmt.Errorf("failed to delete apiserver external public route: %w", err)
+				if _, err := k8sutil.DeleteIfNeeded(ctx, r.Client, externalPrivateRoute); err != nil {
+					return err
 				}
-			}
-			// Reconcile the external private route
-			if _, err := createOrUpdate(ctx, r.Client, externalPrivateRoute, func() error {
-				hostname := ""
-				if serviceStrategy.Route != nil {
-					hostname = serviceStrategy.Route.Hostname
-				}
-				return kas.ReconcileExternalPrivateRoute(externalPrivateRoute, p.OwnerReference, hostname)
-			}); err != nil {
-				return fmt.Errorf("failed to reconcile apiserver external private route %s: %w", externalPrivateRoute.Name, err)
 			}
 		}
 		// The private KAS route is always present as it is the default
@@ -537,7 +522,7 @@ func (r *Reconciler) reconcileAPIServerServiceStatus(ctx context.Context, hcp *h
 	}
 
 	if netutil.UseSharedIngressHCP(hcp) || netutil.UseSwiftNetworkingHCP(hcp) || (hcp.Spec.Platform.Type == hyperv1.IBMCloudPlatform && serviceStrategy.Type == hyperv1.Route) {
-		return sharedingress.KasRouteHostname(hcp), sharedingress.ExternalDNSLBPort, "", nil
+		return netutil.KASRouteHostname(hcp), netutil.ExternalDNSLBPort, "", nil
 	}
 
 	var svc *corev1.Service

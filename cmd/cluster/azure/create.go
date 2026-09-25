@@ -105,6 +105,7 @@ func bindCoreOptions(opts *RawCreateOptions, flags *pflag.FlagSet) {
 	flags.StringVar(&opts.IssuerURL, "oidc-issuer-url", "", util.OIDCIssuerURLDescription)
 	flags.StringVar(&opts.ServiceAccountTokenIssuerKeyPath, "sa-token-issuer-private-key-path", "", util.SATokenIssuerKeyPathDescription)
 	flags.StringVar(&opts.DNSZoneRGName, "dns-zone-rg-name", opts.DNSZoneRGName, util.DNSZoneRGNameDescription)
+	flags.BoolVar(&opts.AutoNode, "auto-node", opts.AutoNode, "If true, this flag indicates the Hosted Cluster will support the AutoNode feature.")
 }
 
 // bindEndpointAccessFlags binds the endpoint access flags for Azure private connectivity
@@ -146,6 +147,8 @@ func BindProductFlags(opts *RawCreateOptions, flags *pflag.FlagSet) {
 
 	// OAuth publishing strategy
 	flags.StringVar(&opts.OAuthPublishingStrategy, "oauth-publishing-strategy", "Route", "Publishing strategy for the OAuth server (Route or LoadBalancer)")
+
+	flags.BoolVar(&opts.AutoNode, "auto-node", opts.AutoNode, "If true, this flag indicates the Hosted Cluster will support AutoNode feature.")
 
 	// Private connectivity flags
 	bindEndpointAccessFlags(opts, flags)
@@ -448,6 +451,7 @@ func (o *CreateOptions) ApplyPlatformSpecifics(cluster *hyperv1.HostedCluster) e
 				KeyName:      o.encryptionKey.KeyName,
 				KeyVersion:   o.encryptionKey.KeyVersion,
 			},
+			KeyVaultType: o.encryptionKey.KeyVaultType,
 		}
 
 		if o.infra.WorkloadIdentities != nil {
@@ -474,7 +478,25 @@ func (o *CreateOptions) ApplyPlatformSpecifics(cluster *hyperv1.HostedCluster) e
 		}
 	}
 
-	cluster.Spec.Services = core.GetIngressServicePublishingStrategyMapping(cluster.Spec.Networking.NetworkType, o.externalDNSDomain != "")
+	if o.AutoNode {
+		if o.infra.KarpenterClientID == "" {
+			return fmt.Errorf("autoNode on Azure requires a Karpenter workload identity; re-run 'hypershift create iam azure' with --enable-karpenter")
+		}
+		cluster.Spec.AutoNode = hyperv1.AutoNode{
+			Provisioner: hyperv1.ProvisionerConfig{
+				Name: hyperv1.ProvisionerKarpenter,
+				Karpenter: hyperv1.KarpenterConfig{
+					Platform: hyperv1.AzurePlatform,
+					Azure: hyperv1.KarpenterAzureConfig{
+						ClientID: hyperv1.AzureClientID(o.infra.KarpenterClientID),
+					},
+				},
+			},
+		}
+	}
+
+	isPrivateOnly := o.EndpointAccess == string(hyperv1.AzureTopologyPrivate)
+	cluster.Spec.Services = core.GetIngressServicePublishingStrategyMapping(cluster.Spec.Networking.NetworkType, o.externalDNSDomain != "", isPrivateOnly)
 
 	for i, svc := range cluster.Spec.Services {
 		if svc.Service == hyperv1.OAuthServer && o.OAuthPublishingStrategy == "LoadBalancer" {

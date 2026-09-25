@@ -20,6 +20,8 @@ import (
 	"github.com/openshift/hypershift/support/upsert"
 	"github.com/openshift/hypershift/support/util"
 
+	configv1 "github.com/openshift/api/config/v1"
+
 	awskarpenterapis "github.com/aws/karpenter-provider-aws/pkg/apis"
 	awskarpenterv1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 
@@ -56,9 +58,7 @@ const (
 	DefaultRootVolumeSize = "120Gi"
 )
 
-var (
-	errKarpenterUserDataSecretNotFound = errors.New("failed to find user data secret for OpenshiftEC2NodeClass")
-)
+var errKarpenterUserDataSecretNotFound = errors.New("failed to find user data secret for OpenshiftEC2NodeClass")
 
 var (
 	crdEC2NodeClass = supportassets.MustCRD(assets.ReadFile, "karpenter.k8s.aws_ec2nodeclasses.yaml")
@@ -68,6 +68,8 @@ var (
 
 type EC2NodeClassReconciler struct {
 	Namespace string
+	// SkipUpstreamCRD leaves the upstream CRD ownership to the standalone operator.
+	SkipUpstreamCRD bool
 
 	managementClient client.Client
 	guestClient      client.Client
@@ -203,7 +205,7 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileStatus(ctx, ec2NodeClass, openshiftEC2NodeClass); err != nil {
+	if err := r.reconcileStatus(ctx, ec2NodeClass, openshiftEC2NodeClass, hcp); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -215,6 +217,10 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	// We requeue an un-pinned NodeClass if the control plane is in the middle of an upgrade to eventually ensure the NodeClass is upgraded to the new release image.
+	if openshiftEC2NodeClass.Spec.Version == "" && isControlPlaneUpgrading(hcp) {
+		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -225,10 +231,13 @@ func (r *EC2NodeClassReconciler) reconcileCRDs(ctx context.Context, onlyCreate b
 	errs := []error{}
 	var op controllerutil.OperationResult
 	var err error
-	for _, desired := range []*apiextensionsv1.CustomResourceDefinition{
-		crdEC2NodeClass,
+	desiredCRDs := []*apiextensionsv1.CustomResourceDefinition{
 		crdOpenshiftEC2NodeClass,
-	} {
+	}
+	if !r.SkipUpstreamCRD {
+		desiredCRDs = append([]*apiextensionsv1.CustomResourceDefinition{crdEC2NodeClass}, desiredCRDs...)
+	}
+	for _, desired := range desiredCRDs {
 		// We need to deep copy because Create/CreateOrUpdate mutates the object
 		crd := desired.DeepCopy()
 		if onlyCreate {
@@ -275,17 +284,52 @@ func AMISelectorTerms(userDataSecret *corev1.Secret, platform hyperv1.PlatformTy
 	return terms, nil
 }
 
+// isControlPlaneUpgrading returns true when the desired release image differs
+// from the most recent Completed version in history.
+// Returns false during initial install (no Completed entry or desired not yet populated).
+// The loop returns on the first CompletedUpdate entry found. This is safe because the
+// ControlPlaneVersion.History list is ordered newest-first per the API contract.
+func isControlPlaneUpgrading(hcp *hyperv1.HostedControlPlane) bool {
+	desiredImage := hcp.Status.ControlPlaneVersion.Desired.Image
+	if desiredImage == "" {
+		return false
+	}
+
+	for _, entry := range hcp.Status.ControlPlaneVersion.History {
+		if entry.State == configv1.CompletedUpdate {
+			return entry.Image != desiredImage
+		}
+	}
+
+	return false
+}
+
 func reconcileEC2NodeClass(ctx context.Context, ec2NodeClass *awskarpenterv1.EC2NodeClass, openshiftEC2NodeClass *hyperkarpenterv1.OpenshiftEC2NodeClass, hcp *hyperv1.HostedControlPlane, userDataSecret *corev1.Secret) error {
 	ownerRef := config.OwnerRefFrom(openshiftEC2NodeClass)
 	ownerRef.ApplyTo(ec2NodeClass)
 
-	amiSelectorTerms, err := AMISelectorTerms(userDataSecret, hcp.Spec.Platform.Type)
-	if err != nil {
-		return fmt.Errorf("failed to get AMISelectorTerms: %w", err)
+	pauseUpgrade := isControlPlaneUpgrading(hcp)
+
+	var amiSelectorTerms []awskarpenterv1.AMISelectorTerm
+
+	userData := ptr.To(string(userDataSecret.Data["value"]))
+
+	// When upgrade is in progress, and the nodeclass is tied to the control plane version, and the EC2NodeClass already has AMI/UserData set
+	// (i.e. not the first creation), preserve the existing drift-triggering fields that cause a node rollout upgrade.
+	if pauseUpgrade && openshiftEC2NodeClass.Spec.Version == "" && len(ec2NodeClass.Spec.AMISelectorTerms) > 0 && ec2NodeClass.Spec.UserData != nil {
+		ctrl.LoggerFrom(ctx).Info("Control plane upgrade in progress, preserving existing userData and amis")
+		userData = ec2NodeClass.Spec.UserData
+		amiSelectorTerms = ec2NodeClass.Spec.AMISelectorTerms
+	} else {
+		var err error
+		amiSelectorTerms, err = AMISelectorTerms(userDataSecret, hcp.Spec.Platform.Type)
+		if err != nil {
+			return fmt.Errorf("failed to get AMISelectorTerms: %w", err)
+		}
 	}
 
 	ec2NodeClass.Spec = awskarpenterv1.EC2NodeClassSpec{
-		UserData:                         ptr.To(string(userDataSecret.Data["value"])),
+		UserData:                         userData,
 		AMIFamily:                        ptr.To("Custom"),
 		AMISelectorTerms:                 amiSelectorTerms,
 		AssociatePublicIPAddress:         karpenterAssociatePublicIPAddressFromNodeClassSpec(openshiftEC2NodeClass.Spec),
@@ -360,7 +404,7 @@ func reconcileEC2NodeClass(ctx context.Context, ec2NodeClass *awskarpenterv1.EC2
 	return nil
 }
 
-func (r *EC2NodeClassReconciler) reconcileStatus(ctx context.Context, ec2NodeClass *awskarpenterv1.EC2NodeClass, openshiftNodeClass *hyperkarpenterv1.OpenshiftEC2NodeClass) error {
+func (r *EC2NodeClassReconciler) reconcileStatus(ctx context.Context, ec2NodeClass *awskarpenterv1.EC2NodeClass, openshiftNodeClass *hyperkarpenterv1.OpenshiftEC2NodeClass, hcp *hyperv1.HostedControlPlane) error {
 	log := ctrl.LoggerFrom(ctx)
 
 	originalObj := openshiftNodeClass.DeepCopy()
@@ -417,6 +461,8 @@ func (r *EC2NodeClassReconciler) reconcileStatus(ctx context.Context, ec2NodeCla
 	// with version resolution status. This ensures a single controller owns the
 	// Ready semantic rather than having multiple controllers race to set it.
 	r.computeReadyCondition(openshiftNodeClass)
+
+	setAWSResourceTagConflictCondition(openshiftNodeClass, hcp)
 
 	if !reflect.DeepEqual(originalObj.Status, openshiftNodeClass.Status) {
 		if err := r.guestClient.Status().Patch(ctx, openshiftNodeClass, client.MergeFrom(originalObj)); err != nil {
@@ -520,7 +566,6 @@ func (r *EC2NodeClassReconciler) reconcileKarpenterSubnetsConfigMap(ctx context.
 
 		return nil
 	})
-
 	if err != nil {
 		return fmt.Errorf("failed to reconcile karpenter subnets configmap: %w", err)
 	}
@@ -714,7 +759,8 @@ func (r *EC2NodeClassReconciler) mapToOpenShiftEC2NodeClasses(ctx context.Contex
 }
 
 // mergeEC2NodeClassTags merges platform tags from HostedControlPlane with OpenshiftEC2NodeClass tags.
-// Platform tags take precedence over nodeclass tags in case of conflicts.
+// By default, platform tags take precedence over nodeclass tags.
+// Platform tags with overridePolicy "Allow" permit nodeclass tags to override them.
 // Tags matching Karpenter's restricted patterns are filtered out to prevent validation errors.
 // Karpenter restricts the patterns because it manages those tags itself, so the result is not "the karpenter-managed tags won't be present",
 // the result is "the tags will still be present and managed by Karpenter"
@@ -722,23 +768,30 @@ func mergeEC2NodeClassTags(ctx context.Context, openshiftEC2NodeClass *hyperkarp
 	log := ctrl.LoggerFrom(ctx)
 	tags := make(map[string]string)
 
-	// First add nodeclass tags
-	for k, v := range openshiftEC2NodeClass.Spec.Tags {
-		tags[k] = v
-	}
-
-	// Then add platform tags (these will override any conflicts)
+	allowOverride := make(map[string]bool)
+	// First add platform tags and track which allow override
 	if hcp.Spec.Platform.AWS != nil {
 		for _, tag := range hcp.Spec.Platform.AWS.ResourceTags {
 			tags[tag.Key] = tag.Value
+			if tag.OverridePolicy == hyperv1.AWSResourceTagOverridePolicyAllow {
+				allowOverride[tag.Key] = true
+			}
 		}
+	}
+
+	// Then add nodeclass tags, only overriding platform tags that explicitly allow it
+	for k, v := range openshiftEC2NodeClass.Spec.Tags {
+		if _, isHCTag := tags[k]; isHCTag && !allowOverride[k] {
+			continue
+		}
+		tags[k] = v
 	}
 
 	// Filter out restricted tags that Karpenter manages automatically
 	filteredTags, removedTags := filterRestrictedTags(tags)
 
 	if len(removedTags) > 0 {
-		log.V(4).Info("Filtered restricted Karpenter tags", "removedTags", removedTags)
+		log.V(4).Info("Filtered restricted Karpenter tags", "removedCount", len(removedTags))
 	}
 
 	// If we were nil coming in, we should be nil going out, test case comparisons care, {} is
@@ -748,6 +801,61 @@ func mergeEC2NodeClassTags(ctx context.Context, openshiftEC2NodeClass *hyperkarp
 	}
 
 	return filteredTags
+}
+
+func setAWSResourceTagConflictCondition(openshiftNodeClass *hyperkarpenterv1.OpenshiftEC2NodeClass, hcp *hyperv1.HostedControlPlane) {
+	if hcp.Spec.Platform.AWS == nil || len(hcp.Spec.Platform.AWS.ResourceTags) == 0 || len(openshiftNodeClass.Spec.Tags) == 0 {
+		meta.RemoveStatusCondition(&openshiftNodeClass.Status.Conditions, hyperv1.NodePoolAWSResourceTagConflictConditionType)
+		return
+	}
+
+	var blocked, overridden int
+	for k, ncVal := range openshiftNodeClass.Spec.Tags {
+		var found bool
+		var hcTag hyperv1.AWSClusterResourceTag
+		for _, t := range hcp.Spec.Platform.AWS.ResourceTags {
+			if t.Key == k {
+				found = true
+				hcTag = t
+				break
+			}
+		}
+		if !found || hcTag.Value == ncVal {
+			continue
+		}
+		if hcTag.OverridePolicy == hyperv1.AWSResourceTagOverridePolicyAllow {
+			overridden++
+		} else {
+			blocked++
+		}
+	}
+
+	if blocked == 0 {
+		msg := "No AWS resource tag conflicts detected"
+		if overridden > 0 {
+			msg = fmt.Sprintf("%d AWS resource tag override(s) applied; nodeclass values used (allowed by HostedCluster)", overridden)
+		}
+		meta.SetStatusCondition(&openshiftNodeClass.Status.Conditions, metav1.Condition{
+			Type:               hyperv1.NodePoolAWSResourceTagConflictConditionType,
+			Status:             metav1.ConditionFalse,
+			Reason:             hyperv1.AWSResourceTagNoConflictReason,
+			Message:            msg,
+			ObservedGeneration: openshiftNodeClass.Generation,
+		})
+		return
+	}
+
+	msg := fmt.Sprintf("%d AWS resource tag conflict(s) detected; HostedCluster values preserved (override not allowed)", blocked)
+	if overridden > 0 {
+		msg += fmt.Sprintf("; %d override(s) applied (allowed by HostedCluster)", overridden)
+	}
+	meta.SetStatusCondition(&openshiftNodeClass.Status.Conditions, metav1.Condition{
+		Type:               hyperv1.NodePoolAWSResourceTagConflictConditionType,
+		Status:             metav1.ConditionTrue,
+		Reason:             hyperv1.AWSResourceTagConflictDetectedReason,
+		Message:            msg,
+		ObservedGeneration: openshiftNodeClass.Generation,
+	})
 }
 
 // filterRestrictedTags removes tags that match Karpenter's restricted tag patterns.

@@ -314,6 +314,22 @@ func KonnectivitySignerSecret(ns string) *corev1.Secret {
 	return secretFor(ns, "konnectivity-signer")
 }
 
+func KonnectivityServerServingSignerSecret(ns string) *corev1.Secret {
+	return secretFor(ns, "konnectivity-server-serving-signer")
+}
+
+func KonnectivityClusterServingSignerSecret(ns string) *corev1.Secret {
+	return secretFor(ns, "konnectivity-cluster-serving-signer")
+}
+
+func KonnectivityServerAuthSignerSecret(ns string) *corev1.Secret {
+	return secretFor(ns, "konnectivity-server-auth-signer")
+}
+
+func KonnectivityClientAuthSignerSecret(ns string) *corev1.Secret {
+	return secretFor(ns, "konnectivity-client-auth-signer")
+}
+
 func KonnectivityServerSecret(ns string) *corev1.Secret { return secretFor(ns, "konnectivity-server") }
 
 func KonnectivityClusterSecret(ns string) *corev1.Secret {
@@ -398,6 +414,14 @@ func AWSEBSCsiDriverOperatorServingCert(ns string) *corev1.Secret {
 
 func AWSEBSCsiDriverControllerMetricsServingCert(ns string) *corev1.Secret {
 	return secretFor(ns, "aws-ebs-csi-driver-controller-metrics-serving-cert")
+}
+
+func GCPPDCsiDriverOperatorServingCert(ns string) *corev1.Secret {
+	return secretFor(ns, "gcp-pd-csi-driver-operator-serving-cert")
+}
+
+func GCPPDCsiDriverControllerMetricsServingCert(ns string) *corev1.Secret {
+	return secretFor(ns, "gcp-pd-csi-driver-controller-metrics-serving-cert")
 }
 
 func MultusAdmissionControllerServingCert(ns string) *corev1.Secret {
