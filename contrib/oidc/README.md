@@ -50,16 +50,57 @@ sequenceDiagram
 - `assets/` - Directory containing images and other assets
   - `login-screen.png` - Screenshot of the Dex login page
 - `requirements.yml` - Ansible Galaxy requirements
-- `requirements.txt` - Python package requirements
 
 ## Prerequisites
 
 1. AWS CLI configured with appropriate credentials
-2. Ansible installed on your local machine
-3. Required Python packages and Ansible collections:
+2. Required Python packages and Ansible collections:
    ```bash
-   pip install -r requirements.txt
+   uv sync
    ansible-galaxy install -r requirements.yml
+   ```
+
+### Running the playbooks
+
+After `uv sync`, use **one of these approaches** to run the playbooks:
+
+**Option A: Activate the virtual environment first (recommended for repeated runs)**
+```bash
+source .venv/bin/activate
+ansible-playbook playbooks/main.yml
+```
+
+**Option B: Run through uv (simpler, one-liner)**
+```bash
+uv run ansible-playbook playbooks/main.yml
+```
+
+Both approaches ensure boto3 and other locked dependencies are available to Ansible's AWS modules.
+
+### Managing Python dependencies
+
+Dependencies are declared in `pyproject.toml` and locked in `uv.lock`. The
+`uv sync` command installs the exact locked versions of boto3 and all
+transitive dependencies (botocore, jmespath, python-dateutil, s3transfer, six,
+urllib3). These are required by Ansible's `amazon.aws` collection modules to
+communicate with AWS APIs.
+
+To add a new dependency or update an existing one:
+
+1. Edit `pyproject.toml` — add or update the dependency in the `dependencies`
+   list. Only direct packages need to be listed; transitive dependencies are
+   resolved automatically.
+
+2. Regenerate the lock file from the `contrib/oidc/` directory:
+
+   ```bash
+   cd contrib/oidc
+   uv lock
+   ```
+
+3. Install:
+   ```bash
+   uv sync
    ```
 
 ## Configuration

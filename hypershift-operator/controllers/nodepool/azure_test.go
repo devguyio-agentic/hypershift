@@ -15,7 +15,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	capiazure "sigs.k8s.io/cluster-api-provider-azure/api/v1beta1"
-	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
+	clusterv1beta1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 
 	"github.com/coreos/stream-metadata-go/stream"
 	"github.com/coreos/stream-metadata-go/stream/rhcos"
@@ -53,7 +53,7 @@ func TestAzureMachineTemplateSpec(t *testing.T) {
 			},
 			expectedAzureMachineTemplateSpec: &capiazure.AzureMachineTemplateSpec{
 				Template: capiazure.AzureMachineTemplateResource{
-					ObjectMeta: clusterv1.ObjectMeta{Labels: nil, Annotations: nil},
+					ObjectMeta: clusterv1beta1.ObjectMeta{Labels: nil, Annotations: nil},
 					Spec: capiazure.AzureMachineSpec{
 						ProviderID:    nil,
 						VMSize:        "Standard_D2_v2",
@@ -127,7 +127,7 @@ func TestAzureMachineTemplateSpec(t *testing.T) {
 			},
 			expectedAzureMachineTemplateSpec: &capiazure.AzureMachineTemplateSpec{
 				Template: capiazure.AzureMachineTemplateResource{
-					ObjectMeta: clusterv1.ObjectMeta{Labels: nil, Annotations: nil},
+					ObjectMeta: clusterv1beta1.ObjectMeta{Labels: nil, Annotations: nil},
 					Spec: capiazure.AzureMachineSpec{
 						ProviderID:    nil,
 						VMSize:        "Standard_D2_v2",
@@ -206,7 +206,7 @@ func TestAzureMachineTemplateSpec(t *testing.T) {
 			},
 			expectedAzureMachineTemplateSpec: &capiazure.AzureMachineTemplateSpec{
 				Template: capiazure.AzureMachineTemplateResource{
-					ObjectMeta: clusterv1.ObjectMeta{Labels: nil, Annotations: nil},
+					ObjectMeta: clusterv1beta1.ObjectMeta{Labels: nil, Annotations: nil},
 					Spec: capiazure.AzureMachineSpec{
 						ProviderID:    nil,
 						VMSize:        "Standard_D2_v2",
@@ -296,7 +296,7 @@ func TestAzureMachineTemplateSpec(t *testing.T) {
 			},
 			expectedAzureMachineTemplateSpec: &capiazure.AzureMachineTemplateSpec{
 				Template: capiazure.AzureMachineTemplateResource{
-					ObjectMeta: clusterv1.ObjectMeta{Labels: nil, Annotations: nil},
+					ObjectMeta: clusterv1beta1.ObjectMeta{Labels: nil, Annotations: nil},
 					Spec: capiazure.AzureMachineSpec{
 						ProviderID:    nil,
 						VMSize:        "Standard_D2_v2",
@@ -392,7 +392,7 @@ func TestAzureMachineTemplateSpec(t *testing.T) {
 			},
 			expectedAzureMachineTemplateSpec: &capiazure.AzureMachineTemplateSpec{
 				Template: capiazure.AzureMachineTemplateResource{
-					ObjectMeta: clusterv1.ObjectMeta{Labels: nil, Annotations: nil},
+					ObjectMeta: clusterv1beta1.ObjectMeta{Labels: nil, Annotations: nil},
 					Spec: capiazure.AzureMachineSpec{
 						ProviderID:    nil,
 						VMSize:        "Standard_D2_v2",
@@ -535,7 +535,7 @@ func TestAzureMachineTemplateSpec(t *testing.T) {
 			acrIdentityResourceID: "/subscriptions/test-sub/resourceGroups/test-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/test-mi",
 			expectedAzureMachineTemplateSpec: &capiazure.AzureMachineTemplateSpec{
 				Template: capiazure.AzureMachineTemplateResource{
-					ObjectMeta: clusterv1.ObjectMeta{Labels: nil, Annotations: nil},
+					ObjectMeta: clusterv1beta1.ObjectMeta{Labels: nil, Annotations: nil},
 					Spec: capiazure.AzureMachineSpec{
 						ProviderID:    nil,
 						VMSize:        "Standard_D2_v2",
@@ -612,7 +612,7 @@ func TestAzureMachineTemplateSpec(t *testing.T) {
 			},
 			expectedAzureMachineTemplateSpec: &capiazure.AzureMachineTemplateSpec{
 				Template: capiazure.AzureMachineTemplateResource{
-					ObjectMeta: clusterv1.ObjectMeta{Labels: nil, Annotations: nil},
+					ObjectMeta: clusterv1beta1.ObjectMeta{Labels: nil, Annotations: nil},
 					Spec: capiazure.AzureMachineSpec{
 						ProviderID:    nil,
 						VMSize:        "Standard_D2_v2",
@@ -746,7 +746,7 @@ func TestAzureMachineTemplate(t *testing.T) {
 								},
 							},
 							SubnetID: "/subscriptions/sub-123/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/vnet-test/subnets/subnet-worker",
-							VMSize:   "Standard_D2s_v3",
+							VMSize:   "Standard_D2s_v5",
 							OSDisk: hyperv1.AzureNodePoolOSDisk{
 								SizeGiB:                64,
 								DiskStorageAccountType: "StandardSSD_LRS",
@@ -761,7 +761,7 @@ func TestAzureMachineTemplate(t *testing.T) {
 			expectedTemplateName: "azure-marketplace-template",
 			expectedErr:          false,
 			validateTemplateSpec: true,
-			expectedVMSize:       "Standard_D2s_v3",
+			expectedVMSize:       "Standard_D2s_v5",
 			expectedSubnetName:   "subnet-worker",
 			expectedMarketplace: &capiazure.AzureMarketplaceImage{
 				ImagePlan: capiazure.ImagePlan{
@@ -787,7 +787,7 @@ func TestAzureMachineTemplate(t *testing.T) {
 								ImageID: ptr.To("test-image"),
 							},
 							SubnetID: "invalid-subnet-id",
-							VMSize:   "Standard_D2s_v3",
+							VMSize:   "Standard_D2s_v5",
 							OSDisk: hyperv1.AzureNodePoolOSDisk{
 								SizeGiB:                30,
 								DiskStorageAccountType: "Standard_LRS",
@@ -814,7 +814,7 @@ func TestAzureMachineTemplate(t *testing.T) {
 								ImageID: ptr.To("test-image"),
 							},
 							SubnetID: "/subscriptions/sub-123/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/vnet-test/subnets/subnet-worker",
-							VMSize:   "Standard_D2s_v3",
+							VMSize:   "Standard_D2s_v5",
 							OSDisk: hyperv1.AzureNodePoolOSDisk{
 								SizeGiB:                30,
 								DiskStorageAccountType: "Standard_LRS",
@@ -841,7 +841,7 @@ func TestAzureMachineTemplate(t *testing.T) {
 								// ImageID intentionally nil
 							},
 							SubnetID: "/subscriptions/sub-123/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/vnet-test/subnets/subnet-worker",
-							VMSize:   "Standard_D2s_v3",
+							VMSize:   "Standard_D2s_v5",
 							OSDisk: hyperv1.AzureNodePoolOSDisk{
 								SizeGiB:                30,
 								DiskStorageAccountType: "Standard_LRS",
@@ -869,7 +869,7 @@ func TestAzureMachineTemplate(t *testing.T) {
 								ImageID: ptr.To("test-image"),
 							},
 							SubnetID:         "/subscriptions/sub-123/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/vnet-test/subnets/subnet-worker",
-							VMSize:           "Standard_D2s_v3",
+							VMSize:           "Standard_D2s_v5",
 							EncryptionAtHost: "Enabled",
 							OSDisk: hyperv1.AzureNodePoolOSDisk{
 								SizeGiB:                30,
@@ -887,7 +887,7 @@ func TestAzureMachineTemplate(t *testing.T) {
 			expectedTemplateName: "azure-secure-template",
 			expectedErr:          false,
 			validateTemplateSpec: true,
-			expectedVMSize:       "Standard_D2s_v3",
+			expectedVMSize:       "Standard_D2s_v5",
 			expectedSubnetName:   "subnet-worker",
 			expectedImageID:      ptr.To("test-image"),
 		},

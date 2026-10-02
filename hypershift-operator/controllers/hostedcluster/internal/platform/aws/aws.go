@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	"github.com/openshift/hypershift/support/config"
 	"github.com/openshift/hypershift/support/images"
 	"github.com/openshift/hypershift/support/upsert"
 
@@ -22,7 +23,8 @@ import (
 	"k8s.io/utils/ptr"
 
 	capiaws "sigs.k8s.io/cluster-api-provider-aws/v2/api/v1beta2"
-	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
+	capiv1beta1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -100,7 +102,7 @@ func (p AWS) ReconcileCAPIInfraCR(ctx context.Context, c client.Client, createOr
 	return awsCluster, nil
 }
 
-func (p AWS) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *hyperv1.HostedControlPlane) (*appsv1.DeploymentSpec, error) {
+func (p AWS) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, hcp *hyperv1.HostedControlPlane) (*appsv1.DeploymentSpec, error) {
 	providerImage := p.capiProviderImage
 	if envImage := os.Getenv(images.AWSCAPIProviderEnvVar); len(envImage) > 0 {
 		// Only override CAPA image with env var if payload version < 4.12
@@ -117,6 +119,22 @@ func (p AWS) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *hype
 	}
 	if p.payloadVersion != nil && (p.payloadVersion.Major >= 5 || (p.payloadVersion.Major == 4 && p.payloadVersion.Minor > 15)) {
 		featureGates = append(featureGates, "ROSA=false")
+	}
+
+	args := []string{
+		"--namespace", "$(MY_NAMESPACE)",
+		"--v=4",
+		"--leader-elect=true",
+		fmt.Sprintf("--feature-gates=%s", strings.Join(featureGates, ",")),
+	}
+	if hcp != nil && p.payloadVersion != nil && (p.payloadVersion.Major >= 5 || (p.payloadVersion.Major == 4 && p.payloadVersion.Minor >= 23)) {
+		tlsArgs, err := config.TLSArgs(hcp.Spec.Configuration.GetTLSSecurityProfile())
+		if err != nil {
+			return nil, err
+		}
+		if len(tlsArgs) > 0 {
+			args = append(args, tlsArgs...)
+		}
 	}
 
 	defaultMode := int32(0640)
@@ -211,11 +229,7 @@ func (p AWS) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *hype
 								Value: "true",
 							},
 						},
-						Args: []string{"--namespace", "$(MY_NAMESPACE)",
-							"--v=4",
-							"--leader-elect=true",
-							fmt.Sprintf("--feature-gates=%s", strings.Join(featureGates, ",")),
-						},
+						Args: args,
 						Ports: []corev1.ContainerPort{
 							{
 								Name:          "healthz",
@@ -288,7 +302,8 @@ func buildAWSWebIdentityCredentials(roleArn, region string) (string, error) {
 
 func (p AWS) ReconcileCredentials(ctx context.Context, c client.Client, createOrUpdate upsert.CreateOrUpdateFN,
 	hcluster *hyperv1.HostedCluster,
-	controlPlaneNamespace string) error {
+	controlPlaneNamespace string,
+) error {
 	// TODO (alberto): consider moving this reconciliation logic down to the CPO.
 	// this is not trivial as the CPO deployment itself needs the secret with the ControlPlaneOperatorARN
 	var errs []error
@@ -340,7 +355,8 @@ func (p AWS) ReconcileCredentials(ctx context.Context, c client.Client, createOr
 
 func (AWS) ReconcileSecretEncryption(ctx context.Context, c client.Client, createOrUpdate upsert.CreateOrUpdateFN,
 	hcluster *hyperv1.HostedCluster,
-	controlPlaneNamespace string) error {
+	controlPlaneNamespace string,
+) error {
 	return nil
 }
 
@@ -425,7 +441,7 @@ func reconcileAWSCluster(awsCluster *capiaws.AWSCluster, hcluster *hyperv1.Hoste
 
 	// Set the values for upper level controller
 	awsCluster.Status.Ready = true
-	awsCluster.Spec.ControlPlaneEndpoint = capiv1.APIEndpoint{
+	awsCluster.Spec.ControlPlaneEndpoint = capiv1beta1.APIEndpoint{
 		Host: apiEndpoint.Host,
 		Port: apiEndpoint.Port,
 	}

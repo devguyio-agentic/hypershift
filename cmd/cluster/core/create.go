@@ -323,7 +323,6 @@ func prototypeResources(ctx context.Context, opts *CreateOptions) (*resources, e
 			ControllerAvailabilityPolicy:     hyperv1.AvailabilityPolicy(opts.ControlPlaneAvailabilityPolicy),
 			InfrastructureAvailabilityPolicy: hyperv1.AvailabilityPolicy(opts.InfrastructureAvailabilityPolicy),
 			Configuration:                    &hyperv1.ClusterConfiguration{},
-			Capabilities:                     &hyperv1.Capabilities{},
 		},
 	}
 
@@ -402,6 +401,12 @@ func resolvePullSecret(opts *CreateOptions) ([]byte, error) {
 }
 
 func applyClusterCapabilities(cluster *hyperv1.HostedCluster, opts *CreateOptions) {
+	if len(opts.EnableClusterCapabilities) == 0 && len(opts.DisableClusterCapabilities) == 0 {
+		return
+	}
+	if cluster.Spec.Capabilities == nil {
+		cluster.Spec.Capabilities = &hyperv1.Capabilities{}
+	}
 	if len(opts.EnableClusterCapabilities) > 0 {
 		caps := make([]hyperv1.OptionalCapability, len(opts.EnableClusterCapabilities))
 		for i, c := range opts.EnableClusterCapabilities {
@@ -1089,10 +1094,9 @@ func defaultNodePool(opts *CreateOptions) func(platformType hyperv1.PlatformType
 	}
 }
 
-func GetIngressServicePublishingStrategyMapping(netType hyperv1.NetworkType, usesExternalDNS bool) []hyperv1.ServicePublishingStrategyMapping {
-	// TODO (Alberto): Default KAS to Route if endpointAccess is Private.
+func GetIngressServicePublishingStrategyMapping(netType hyperv1.NetworkType, usesExternalDNS bool, isPrivate bool) []hyperv1.ServicePublishingStrategyMapping {
 	apiServiceStrategy := hyperv1.LoadBalancer
-	if usesExternalDNS {
+	if usesExternalDNS || isPrivate {
 		apiServiceStrategy = hyperv1.Route
 	}
 	services := map[hyperv1.ServiceType]hyperv1.PublishingStrategyType{

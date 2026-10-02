@@ -10,8 +10,11 @@ import (
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/support/azureutil"
 	"github.com/openshift/hypershift/support/certs"
+	v2util "github.com/openshift/hypershift/test/e2e/v2/util"
 
 	"k8s.io/utils/ptr"
+
+	"github.com/blang/semver"
 )
 
 func TestAllowedCIDRsTargetService(t *testing.T) {
@@ -130,6 +133,114 @@ func TestAllowedCIDRsTargetService(t *testing.T) {
 	}
 }
 
+func TestExpectedNodeRuntimeHandlers(t *testing.T) {
+	originalVersion := releaseVersion
+	t.Cleanup(func() { releaseVersion = originalVersion })
+
+	tests := []struct {
+		name           string
+		releaseVersion semver.Version
+		nodePool       *hyperv1.NodePool
+		wantRunc       bool
+		wantErr        bool
+	}{
+		{
+			name:           "When status reports RHEL 10 and suite is pre-5.0, it should not require runc",
+			releaseVersion: Version423,
+			nodePool: &hyperv1.NodePool{Status: hyperv1.NodePoolStatus{
+				OSImageStream: hyperv1.OSImageStreamReference{Name: hyperv1.OSImageStreamRHEL10},
+			}},
+			wantRunc: false,
+		},
+		{
+			name:           "When status reports RHEL 9 and suite is 5.0+, it should require runc",
+			releaseVersion: Version50,
+			nodePool: &hyperv1.NodePool{Status: hyperv1.NodePoolStatus{
+				OSImageStream: hyperv1.OSImageStreamReference{Name: hyperv1.OSImageStreamRHEL9},
+			}},
+			wantRunc: true,
+		},
+		{
+			name:           "When status reports RHEL 10 and spec requests RHEL 9, it should not require runc",
+			releaseVersion: Version423,
+			nodePool: &hyperv1.NodePool{
+				Spec:   hyperv1.NodePoolSpec{OSImageStream: hyperv1.OSImageStreamReference{Name: hyperv1.OSImageStreamRHEL9}},
+				Status: hyperv1.NodePoolStatus{OSImageStream: hyperv1.OSImageStreamReference{Name: hyperv1.OSImageStreamRHEL10}},
+			},
+			wantRunc: false,
+		},
+		{
+			name:           "When status reports RHEL 9 and spec requests RHEL 10, it should require runc",
+			releaseVersion: Version50,
+			nodePool: &hyperv1.NodePool{
+				Spec:   hyperv1.NodePoolSpec{OSImageStream: hyperv1.OSImageStreamReference{Name: hyperv1.OSImageStreamRHEL10}},
+				Status: hyperv1.NodePoolStatus{OSImageStream: hyperv1.OSImageStreamReference{Name: hyperv1.OSImageStreamRHEL9}},
+			},
+			wantRunc: true,
+		},
+		{
+			name:           "When status version is pre-5.0 with no stream info, it should require runc",
+			releaseVersion: Version50,
+			nodePool:       &hyperv1.NodePool{Status: hyperv1.NodePoolStatus{Version: "4.23.0"}},
+			wantRunc:       true,
+		},
+		{
+			name:           "When status version is 5.0+ with no stream info, it should not require runc",
+			releaseVersion: Version423,
+			nodePool:       &hyperv1.NodePool{Status: hyperv1.NodePoolStatus{Version: "5.0.0"}},
+			wantRunc:       false,
+		},
+		{
+			name:           "When status version is invalid semver, it should return an error",
+			releaseVersion: Version50,
+			nodePool:       &hyperv1.NodePool{Status: hyperv1.NodePoolStatus{Version: "not-a-semver"}},
+			wantErr:        true,
+		},
+		{
+			name:           "When spec requests RHEL 9 and status version is 5.0+, it should require runc",
+			releaseVersion: Version50,
+			nodePool: &hyperv1.NodePool{
+				Spec:   hyperv1.NodePoolSpec{OSImageStream: hyperv1.OSImageStreamReference{Name: hyperv1.OSImageStreamRHEL9}},
+				Status: hyperv1.NodePoolStatus{Version: "5.0.0"},
+			},
+			wantRunc: true,
+		},
+		{
+			name:           "When NodePool has no stream or version info, it should fall back to suite release version",
+			releaseVersion: Version423,
+			nodePool:       &hyperv1.NodePool{},
+			wantRunc:       true,
+		},
+		{
+			name:           "When NodePool is nil, it should fall back to suite release version",
+			releaseVersion: Version423,
+			wantRunc:       true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			releaseVersion = tc.releaseVersion
+			got, err := expectedNodeRuntimeHandlers(tc.nodePool)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected invalid status version to fail validation")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected valid NodePool state, got error: %v", err)
+			}
+			if _, ok := got["crun"]; !ok {
+				t.Fatal("expected crun to be required")
+			}
+			if _, ok := got["runc"]; ok != tc.wantRunc {
+				t.Errorf("runc required = %t, want %t; handlers = %#v", ok, tc.wantRunc, got)
+			}
+		})
+	}
+}
+
 // TestGenerateCustomCertificate verifies that our certificate generation works correctly
 func TestGenerateCustomCertificate(t *testing.T) {
 	testsCases := []struct {
@@ -164,7 +275,7 @@ func TestGenerateCustomCertificate(t *testing.T) {
 	for _, tc := range testsCases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := NewWithT(t)
-			certPEM, keyPEM, err := GenerateCustomCertificate(tc.dnsNames, tc.duration)
+			certPEM, keyPEM, err := v2util.GenerateCustomCertificate(tc.dnsNames, tc.duration)
 
 			if tc.wantErr {
 				g.Expect(err).To(HaveOccurred())
@@ -204,6 +315,60 @@ func TestGenerateCustomCertificate(t *testing.T) {
 			// Verify the private key can be parsed
 			_, err = certs.PemToPrivateKey(keyPEM)
 			g.Expect(err).NotTo(HaveOccurred())
+		})
+	}
+}
+
+func TestMatchesLeaderElectionFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		line  string
+		match bool
+	}{
+		{
+			name:  "When log contains controller-runtime leader election lost error, it should match",
+			line:  `E0709 10:32:45.123456       1 main.go:42] "leader election lost"`,
+			match: true,
+		},
+		{
+			name:  "When log contains structured leader election lost error, it should match",
+			line:  `{"ts":"2025-07-09T10:32:45Z","level":"error","msg":"leader election lost"}`,
+			match: true,
+		},
+		{
+			name:  "When log contains failed to renew lease message, it should match",
+			line:  `I0709 10:32:45.123456       1 leaderelection.go:299] "Failed to renew lease" lock="ns/lease" err="context deadline exceeded"`,
+			match: true,
+		},
+		{
+			name:  "When log contains stopped leading event, it should match",
+			line:  `I0709 10:32:45.123456       1 leaderelection.go:280] stopped leading`,
+			match: true,
+		},
+		{
+			name:  "When log contains unrelated message, it should not match",
+			line:  `I0709 10:32:45.123456       1 controller.go:100] "Reconciling resource" name="my-resource"`,
+			match: false,
+		},
+		{
+			name:  "When log contains election in non-failure context, it should not match",
+			line:  `I0709 10:32:45.123456       1 leaderelection.go:272] "Successfully acquired lease"`,
+			match: false,
+		},
+		{
+			name:  "When log is empty, it should not match",
+			line:  "",
+			match: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := NewWithT(t)
+			g.Expect(MatchesLeaderElectionFailure(tc.line)).To(Equal(tc.match))
 		})
 	}
 }

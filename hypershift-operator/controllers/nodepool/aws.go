@@ -3,6 +3,8 @@ package nodepool
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/support/releaseinfo"
@@ -13,7 +15,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	capiaws "sigs.k8s.io/cluster-api-provider-aws/v2/api/v1beta2"
-	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -109,6 +111,7 @@ func awsMachineTemplateSpec(infraName string, hostedCluster *hyperv1.HostedClust
 		},
 	}
 
+	applyAWSCPUOptions(nodePool, awsMachineTemplateSpec)
 	applyAWSPlacementOptions(nodePool, awsMachineTemplateSpec)
 
 	if hostedCluster.Annotations[hyperv1.AWSMachinePublicIPs] == "true" {
@@ -192,19 +195,54 @@ func buildAWSSecurityGroups(nodePool *hyperv1.NodePool, hostedCluster *hyperv1.H
 			Filters: filters,
 		})
 	}
-	if defaultSG {
-		if hostedCluster.Status.Platform == nil || hostedCluster.Status.Platform.AWS == nil || hostedCluster.Status.Platform.AWS.DefaultWorkerSecurityGroupID == "" {
-			return nil, &NotReadyError{fmt.Errorf("the default security group for the HostedCluster has not been created")}
-		}
-		sgID := hostedCluster.Status.Platform.AWS.DefaultWorkerSecurityGroupID
+	// Default worker security group ID as recorded in HostedCluster status by the control
+	// plane operator (empty until the CPO creates it, or forever for a CPO that does not
+	// manage a default worker SG).
+	var defaultWorkerSGID string
+	if hostedCluster.Status.Platform != nil && hostedCluster.Status.Platform.AWS != nil {
+		defaultWorkerSGID = hostedCluster.Status.Platform.AWS.DefaultWorkerSecurityGroupID
+	}
+
+	// When the CPO is known to create a default worker security group (defaultSG is derived
+	// from the CPO image capability label), block template rendering until its ID has been
+	// recorded in status. This is what tells us an SG is coming for this cluster; a CPO that
+	// does not manage a default worker SG reports defaultSG=false and is never gated here.
+	if defaultSG && defaultWorkerSGID == "" {
+		return nil, &NotReadyError{fmt.Errorf("the default security group for the HostedCluster has not been created")}
+	}
+
+	// Inject the default worker security group whenever its ID is present in status, even if
+	// the per-reconcile capability flag transiently reads false. The status ID is the
+	// authoritative, monotonic signal: keying injection on it (rather than solely on the
+	// fail-open capability flag) keeps the AWSMachineTemplate hash stable across reconciles
+	// and prevents a false->true capability flip from re-rendering the template and
+	// triggering an unwanted rolling replacement of all workers (OCPBUGS-105464).
+	if defaultWorkerSGID != "" {
 		securityGroups = append(securityGroups, capiaws.AWSResourceReference{
-			ID: &sgID,
+			ID: &defaultWorkerSGID,
 		})
 	}
 	return securityGroups, nil
 }
 
+func applyAWSCPUOptions(nodePool *hyperv1.NodePool, spec *capiaws.AWSMachineTemplateSpec) {
+	if nodePool.Spec.Platform.AWS == nil {
+		return
+	}
+
+	switch nodePool.Spec.Platform.AWS.CPUOptions.NestedVirtualizationPolicy {
+	case hyperv1.NestedVirtualizationEnabled:
+		spec.Template.Spec.CPUOptions.NestedVirtualization = capiaws.NestedVirtualizationPolicyEnabled
+	case hyperv1.NestedVirtualizationDisabled:
+		spec.Template.Spec.CPUOptions.NestedVirtualization = capiaws.NestedVirtualizationPolicyDisabled
+	}
+}
+
 func applyAWSPlacementOptions(nodePool *hyperv1.NodePool, spec *capiaws.AWSMachineTemplateSpec) {
+	if nodePool.Spec.Platform.AWS == nil {
+		return
+	}
+
 	placement := nodePool.Spec.Platform.AWS.Placement
 	if placement == nil {
 		return
@@ -246,12 +284,24 @@ func applyAWSPlacementOptions(nodePool *hyperv1.NodePool, spec *capiaws.AWSMachi
 		spec.Template.Spec.CapacityReservationID = capacityReservation.ID
 		spec.Template.Spec.CapacityReservationPreference = capiaws.CapacityReservationPreference(capacityReservation.Preference)
 	}
+
 }
 
 func awsAdditionalTags(nodePool *hyperv1.NodePool, hostedCluster *hyperv1.HostedCluster, infraName string) capiaws.Tags {
 	tags := capiaws.Tags{}
-	for _, tag := range append(nodePool.Spec.Platform.AWS.ResourceTags, hostedCluster.Spec.Platform.AWS.ResourceTags...) {
+
+	// Build an index of HC tags that allow override.
+	hcAllowed := make(map[string]bool, len(hostedCluster.Spec.Platform.AWS.ResourceTags))
+	for _, tag := range hostedCluster.Spec.Platform.AWS.ResourceTags {
 		tags[tag.Key] = tag.Value
+		hcAllowed[tag.Key] = tag.OverridePolicy == hyperv1.AWSResourceTagOverridePolicyAllow
+	}
+
+	for _, tag := range nodePool.Spec.Platform.AWS.ResourceTags {
+		allowed, isHCTag := hcAllowed[tag.Key]
+		if !isHCTag || allowed {
+			tags[tag.Key] = tag.Value
+		}
 	}
 
 	// We enforce the AWS cluster cloud provider tag here.
@@ -267,6 +317,82 @@ func awsAdditionalTags(nodePool *hyperv1.NodePool, hostedCluster *hyperv1.Hosted
 	}
 
 	return tags
+}
+
+// awsTagConflictResult categorizes tag conflicts by their override status.
+type awsTagConflictResult struct {
+	// blocked are keys where the HC tag disallows override (HC value preserved).
+	blocked []string
+	// overridden are keys where the HC tag allows override (NP value used).
+	overridden []string
+}
+
+func awsTagConflicts(nodePool *hyperv1.NodePool, hostedCluster *hyperv1.HostedCluster) awsTagConflictResult {
+	type hcTag struct {
+		value          string
+		overridePolicy hyperv1.AWSResourceTagOverridePolicy
+	}
+	clusterTags := make(map[string]hcTag, len(hostedCluster.Spec.Platform.AWS.ResourceTags))
+	for _, tag := range hostedCluster.Spec.Platform.AWS.ResourceTags {
+		clusterTags[tag.Key] = hcTag{value: tag.Value, overridePolicy: tag.OverridePolicy}
+	}
+
+	npEffective := make(map[string]string, len(nodePool.Spec.Platform.AWS.ResourceTags))
+	for _, tag := range nodePool.Spec.Platform.AWS.ResourceTags {
+		npEffective[tag.Key] = tag.Value
+	}
+
+	var result awsTagConflictResult
+	for k, npVal := range npEffective {
+		hc, ok := clusterTags[k]
+		if !ok || hc.value == npVal {
+			continue
+		}
+		if hc.overridePolicy == hyperv1.AWSResourceTagOverridePolicyAllow {
+			result.overridden = append(result.overridden, k)
+		} else {
+			result.blocked = append(result.blocked, k)
+		}
+	}
+	sort.Strings(result.blocked)
+	sort.Strings(result.overridden)
+	return result
+}
+
+func setAWSResourceTagConflictCondition(nodePool *hyperv1.NodePool, hostedCluster *hyperv1.HostedCluster) {
+	if hostedCluster.Spec.Platform.AWS == nil || nodePool.Spec.Platform.AWS == nil {
+		removeStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolAWSResourceTagConflictConditionType)
+		return
+	}
+
+	conflicts := awsTagConflicts(nodePool, hostedCluster)
+
+	if len(conflicts.blocked) == 0 {
+		msg := "No AWS resource tag conflicts detected"
+		if len(conflicts.overridden) > 0 {
+			msg = fmt.Sprintf("AWS resource tag overrides applied for keys %s; NodePool values used (allowed by HostedCluster)", strings.Join(conflicts.overridden, ", "))
+		}
+		SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
+			Type:               hyperv1.NodePoolAWSResourceTagConflictConditionType,
+			Status:             corev1.ConditionFalse,
+			Reason:             hyperv1.AWSResourceTagNoConflictReason,
+			Message:            msg,
+			ObservedGeneration: nodePool.Generation,
+		})
+		return
+	}
+
+	msg := fmt.Sprintf("AWS resource tag conflicts detected for keys %s; HostedCluster values preserved (override not allowed)", strings.Join(conflicts.blocked, ", "))
+	if len(conflicts.overridden) > 0 {
+		msg += fmt.Sprintf("; overrides applied for keys %s (allowed by HostedCluster)", strings.Join(conflicts.overridden, ", "))
+	}
+	SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
+		Type:               hyperv1.NodePoolAWSResourceTagConflictConditionType,
+		Status:             corev1.ConditionTrue,
+		Reason:             hyperv1.AWSResourceTagConflictDetectedReason,
+		Message:            msg,
+		ObservedGeneration: nodePool.Generation,
+	})
 }
 
 func (c *CAPI) awsMachineTemplate(ctx context.Context, templateNameGenerator func(spec any) (string, error)) (*capiaws.AWSMachineTemplate, error) {
@@ -331,11 +457,12 @@ func (c *CAPI) reconcileAWSMachines(ctx context.Context) error {
 	return errors.NewAggregate(errs)
 }
 
-func (r *NodePoolReconciler) setAWSConditions(_ context.Context, nodePool *hyperv1.NodePool, hcluster *hyperv1.HostedCluster, _ string, releaseImage *releaseinfo.ReleaseImage) error {
+func (r *NodePoolReconciler) setAWSConditions(_ context.Context, nodePool *hyperv1.NodePool, hcluster *hyperv1.HostedCluster, _ string, releaseImage *releaseinfo.ReleaseImage, resolvedRHELStream string) error {
 	if nodePool.Spec.Platform.Type == hyperv1.AWSPlatform {
 		if hcluster.Spec.Platform.AWS == nil {
 			return fmt.Errorf("the HostedCluster for this NodePool has no .Spec.Platform.AWS, this is unsupported")
 		}
+		setAWSResourceTagConflictCondition(nodePool, hcluster)
 		if nodePool.Spec.Platform.AWS.AMI != "" {
 			// User-defined AMIs cannot be validated
 			removeStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolValidPlatformImageType)
@@ -361,9 +488,7 @@ func (r *NodePoolReconciler) setAWSConditions(_ context.Context, nodePool *hyper
 			})
 		} else {
 			// Default behavior for Linux/RHCOS AMIs.
-			// TODO(CNTRLPLANE-3553): hardcode to rhel-9 until the MCO can install
-			// rhel-10 OS images. Use getRHELStreamForBootImage once MCO support lands.
-			ami, err := defaultNodePoolAMI(hcluster.Spec.Platform.AWS.Region, nodePool.Spec.Arch, StreamRHEL9, releaseImage)
+			ami, err := defaultNodePoolAMI(hcluster.Spec.Platform.AWS.Region, nodePool.Spec.Arch, resolvedRHELStream, releaseImage)
 			if err != nil {
 				SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 					Type:               hyperv1.NodePoolValidPlatformImageType,
@@ -420,7 +545,37 @@ func (r NodePoolReconciler) validateAWSPlatformConfig(ctx context.Context, nodeP
 		}
 	}
 
+	if err := validateNestedVirtualizationInstanceType(nodePool.Spec.Platform.AWS.CPUOptions, nodePool.Spec.Platform.AWS.InstanceType); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// nestedVirtualizationSupportedInstanceFamilies are the EC2 instance families that support
+// CpuOptions.NestedVirtualization, per AWS's "Supported CPU options" documentation:
+// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/cpu-options-supported-instances-values.html
+// This includes the base family (e.g. "c8i") and its "-flex" variant (e.g. "c8i-flex"), both of
+// which were made generally available together for each family.
+var nestedVirtualizationSupportedInstanceFamilies = []string{"c8i", "m8i", "r8i"}
+
+// validateNestedVirtualizationInstanceType returns an error if cpuOptions.nestedVirtualizationPolicy
+// is set on an EC2 instance type that doesn't support it. Nested virtualization is only supported
+// on 8th generation Intel-based instance types (c8i, m8i, r8i, and their "-flex" variants).
+func validateNestedVirtualizationInstanceType(cpuOptions hyperv1.CPUOptions, instanceType string) error {
+	if cpuOptions.NestedVirtualizationPolicy != hyperv1.NestedVirtualizationEnabled {
+		// Nothing to validate: the field is unset, or explicitly disabled (a no-op on any instance type).
+		return nil
+	}
+
+	family, _, _ := strings.Cut(instanceType, ".")
+	for _, supported := range nestedVirtualizationSupportedInstanceFamilies {
+		if family == supported || family == supported+"-flex" {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("cpuOptions.nestedVirtualizationPolicy is only supported on C8i, M8i, and R8i instance families (including their -flex variants), got instanceType %q", instanceType)
 }
 
 // getWindowsAMI returns the appropriate Windows AMI for the given region from release image metadata.

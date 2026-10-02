@@ -42,7 +42,7 @@ func NewCreateCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.InfraID, "infra-id", opts.InfraID, "Cluster ID(required)")
 	cmd.Flags().StringVar(&opts.CredentialsFile, "azure-creds", opts.CredentialsFile, "Path to a credentials file (required). This file is used to create credentials used to create the necessary Azure resources for the HostedCluster.")
 	cmd.Flags().StringVar(&opts.Location, "location", opts.Location, "Azure location where HostedCluster infrastructure should be created")
-	cmd.Flags().StringVar(&opts.Cloud, "cloud", opts.Cloud, "Azure cloud environment (AzurePublicCloud, AzureUSGovernmentCloud, AzureChinaCloud)")
+	cmd.Flags().StringVar(&opts.Cloud, "cloud", opts.Cloud, "Azure cloud environment (AzurePublicCloud, AzureUSGovernmentCloud, AzureChinaCloud, AzureGermanCloud, AzureBleuCloud)")
 	cmd.Flags().StringVar(&opts.BaseDomain, "base-domain", opts.BaseDomain, "The ingress base domain for the HostedCluster")
 	cmd.Flags().StringVar(&opts.Name, "name", opts.Name, "A name for the HostedCluster")
 	cmd.Flags().StringVar(&opts.ResourceGroupName, "resource-group-name", opts.ResourceGroupName, "A resource group name to create the HostedCluster infrastructure resources under. If not provided, a new resource group will be created.")
@@ -99,7 +99,7 @@ func BindProductFlags(opts *CreateInfraOptions, flags *pflag.FlagSet) {
 
 	// Location and cloud
 	flags.StringVar(&opts.Location, "location", opts.Location, util.LocationDescription)
-	flags.StringVar(&opts.Cloud, "cloud", opts.Cloud, "Azure cloud environment (AzurePublicCloud, AzureUSGovernmentCloud, AzureChinaCloud)")
+	flags.StringVar(&opts.Cloud, "cloud", opts.Cloud, "Azure cloud environment (AzurePublicCloud, AzureUSGovernmentCloud, AzureChinaCloud, AzureGermanCloud, AzureBleuCloud)")
 	flags.StringVar(&opts.BaseDomain, "base-domain", opts.BaseDomain, util.BaseDomainInfraDescription)
 
 	// Resource group and tags
@@ -276,15 +276,22 @@ func (o *CreateInfraOptions) handleIdentitiesAndRBAC(ctx context.Context, rbacMg
 			return fmt.Errorf("failed to unmarshal --workload-identities-file: %w", err)
 		}
 		var iamExtra struct {
-			KMSClientID string `json:"kmsClientID,omitempty"`
+			KMSClientID       string `json:"kmsClientID,omitempty"`
+			KarpenterClientID string `json:"karpenterClientID,omitempty"`
 		}
 		if err := json.Unmarshal(workloadIdentitiesRaw, &iamExtra); err == nil {
 			result.KMSClientID = iamExtra.KMSClientID
+			result.KarpenterClientID = iamExtra.KarpenterClientID
 		}
 
 		if o.AssignServicePrincipalRoles {
 			if err := rbacMgr.AssignWorkloadIdentities(ctx, o, result.WorkloadIdentities, resourceGroupName, nsgResourceGroupName, vnetResourceGroupName); err != nil {
 				return err
+			}
+			if result.KarpenterClientID != "" {
+				if err := rbacMgr.AssignKarpenterRoles(ctx, o, result.KarpenterClientID, resourceGroupName, vnetResourceGroupName); err != nil {
+					return err
+				}
 			}
 		}
 	}

@@ -33,25 +33,25 @@ func TestValidateEndpointAccess(t *testing.T) {
 		expectError                                         bool
 		expectedErrorMsg                                    string
 	}{
-		"When endpoint-access has an invalid value it should return an error": {
+		"When endpoint-access has an invalid value, it should return an error": {
 			endpointAccess:   "InvalidValue",
 			expectError:      true,
 			expectedErrorMsg: "--endpoint-access must be one of: Public, PublicAndPrivate, Private",
 		},
-		"When endpoint-access is Private without nat-subnet-id it should succeed (controller auto-creates)": {
+		"When endpoint-access is Private without nat-subnet-id, it should succeed (controller auto-creates)": {
 			endpointAccess: "Private",
 			expectError:    false,
 		},
-		"When endpoint-access is PublicAndPrivate without nat-subnet-id it should succeed (controller auto-creates)": {
+		"When endpoint-access is PublicAndPrivate without nat-subnet-id, it should succeed (controller auto-creates)": {
 			endpointAccess: "PublicAndPrivate",
 			expectError:    false,
 		},
-		"When endpoint-access is Private with nat-subnet-id it should succeed without additional subscriptions": {
+		"When endpoint-access is Private with nat-subnet-id, it should succeed without additional subscriptions": {
 			endpointAccess:                   "Private",
 			endpointAccessPrivateNATSubnetID: "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet/subnets/nat-subnet",
 			expectError:                      false,
 		},
-		"When endpoint-access is Public it should succeed without private connectivity fields": {
+		"When endpoint-access is Public, it should succeed without private connectivity fields": {
 			endpointAccess: "Public",
 			expectError:    false,
 		},
@@ -96,14 +96,14 @@ func TestDNSZoneRGValidation(t *testing.T) {
 		expectError bool
 		errContains string
 	}{
-		"When assign-service-principal-roles is set without dns-zone-rg-name it should return an error": {
+		"When assign-service-principal-roles is set without dns-zone-rg-name, it should return an error": {
 			extraArgs: []string{
 				"--assign-service-principal-roles",
 			},
 			expectError: true,
 			errContains: "--dns-zone-rg-name is required when --assign-service-principal-roles or --assign-custom-hcp-roles is set",
 		},
-		"When assign-custom-hcp-roles is set without dns-zone-rg-name it should return an error": {
+		"When assign-custom-hcp-roles is set without dns-zone-rg-name, it should return an error": {
 			extraArgs: []string{
 				"--assign-custom-hcp-roles",
 			},
@@ -179,6 +179,7 @@ func setupAzureTestFixtures(t *testing.T) (credentialsFile, infraFile, pullSecre
 		InfraID:           "fakeInfraID",
 		SecurityGroupID:   "fakeSecurityGroupID",
 		ControlPlaneMIs:   &hyperv1.AzureResourceManagedIdentities{},
+		KarpenterClientID: "12345678-1234-1234-1234-123456789012",
 	})
 	if err != nil {
 		t.Fatalf("failed to marshal infra: %v", err)
@@ -210,14 +211,14 @@ func TestRoleAssignmentWithInfraJSON(t *testing.T) {
 		expectError bool
 		errContains string
 	}{
-		"When assign-custom-hcp-roles is set with infra-json it should return an error": {
+		"When assign-custom-hcp-roles is set with infra-json, it should return an error": {
 			extraArgs: []string{
 				"--assign-custom-hcp-roles",
 			},
 			expectError: true,
 			errContains: "role assignment flags cannot be used with --infra-json",
 		},
-		"When assign-service-principal-roles is set with infra-json it should return an error": {
+		"When assign-service-principal-roles is set with infra-json, it should return an error": {
 			extraArgs: []string{
 				"--assign-service-principal-roles",
 				"--dns-zone-rg-name=my-dns-rg",
@@ -225,7 +226,7 @@ func TestRoleAssignmentWithInfraJSON(t *testing.T) {
 			expectError: true,
 			errContains: "role assignment flags cannot be used with --infra-json",
 		},
-		"When role assignment flags are not set with infra-json it should succeed": {
+		"When role assignment flags are not set with infra-json, it should succeed": {
 			extraArgs:   nil,
 			expectError: false,
 		},
@@ -283,7 +284,7 @@ func TestCreateCluster(t *testing.T) {
 		args []string
 	}{
 		{
-			name: "minimal flags necessary to render",
+			name: "When minimal flags are provided, it should render successfully",
 			args: []string{
 				"--azure-creds=" + credentialsFile,
 				"--infra-json=" + infraFile,
@@ -295,7 +296,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "complicated invocation from bryan",
+			name: "When complex configuration flags are provided, it should create cluster with all options",
 			args: []string{
 				"--azure-creds=" + credentialsFile,
 				"--infra-json=" + infraFile,
@@ -314,7 +315,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "create with azure marketplace image",
+			name: "When Azure Marketplace image flags are provided, it should configure marketplace image",
 			args: []string{
 				"--azure-creds=" + credentialsFile,
 				"--infra-json=" + infraFile,
@@ -336,7 +337,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "with availability zones",
+			name: "When availability zones are provided, it should configure zones",
 			args: []string{
 				"--azure-creds=" + credentialsFile,
 				"--infra-json=" + infraFile,
@@ -349,7 +350,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "with disabled capabilities",
+			name: "When disabled capabilities are provided, it should configure disabled capabilities",
 			args: []string{
 				"--name=example",
 				"--pull-secret=" + pullSecretFile,
@@ -362,7 +363,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "with KubeAPIServerDNSName",
+			name: "When KubeAPIServerDNSName is provided, it should configure custom DNS name",
 			args: []string{
 				"--name=example",
 				"--pull-secret=" + pullSecretFile,
@@ -375,7 +376,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "with image generation Gen1",
+			name: "When image generation Gen1 is provided, it should configure Gen1 images",
 			args: []string{
 				"--azure-creds=" + credentialsFile,
 				"--infra-json=" + infraFile,
@@ -387,7 +388,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "with image generation Gen2",
+			name: "When image generation Gen2 is provided, it should configure Gen2 images",
 			args: []string{
 				"--azure-creds=" + credentialsFile,
 				"--infra-json=" + infraFile,
@@ -399,7 +400,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "with marketplace flags and image generation Gen1",
+			name: "When marketplace flags and image generation Gen1 are provided, it should configure marketplace with Gen1",
 			args: []string{
 				"--azure-creds=" + credentialsFile,
 				"--infra-json=" + infraFile,
@@ -415,7 +416,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "with availability zones and image generation Gen1",
+			name: "When availability zones and image generation Gen1 are provided, it should configure zones with Gen1",
 			args: []string{
 				"--azure-creds=" + credentialsFile,
 				"--infra-json=" + infraFile,
@@ -428,7 +429,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "When endpoint-access is Private with endpoint-access-private flags it should render HostedCluster with Private endpoint access",
+			name: "When endpoint-access is Private with private flags, it should configure private endpoint access",
 			args: []string{
 				"--azure-creds=" + credentialsFile,
 				"--infra-json=" + infraFile,
@@ -443,7 +444,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "When oauth-publishing-strategy is LoadBalancer with workload identities it should render HostedCluster with OAuth LoadBalancer",
+			name: "When oauth-publishing-strategy is LoadBalancer, it should configure OAuth LoadBalancer",
 			args: []string{
 				"--azure-creds=" + credentialsFile,
 				"--infra-json=" + infraFile,
@@ -451,6 +452,19 @@ func TestCreateCluster(t *testing.T) {
 				"--name=example",
 				"--pull-secret=" + pullSecretFile,
 				"--oauth-publishing-strategy=LoadBalancer",
+			},
+		},
+		{
+			name: "When auto-node is set, it should render HostedCluster with Azure Karpenter AutoNode",
+			args: []string{
+				"--azure-creds=" + credentialsFile,
+				"--infra-json=" + infraFile,
+				"--render-sensitive",
+				"--name=example",
+				"--pull-secret=" + pullSecretFile,
+				"--managed-identities-file", filepath.Join(tempDir, "managedIdentities.json"),
+				"--data-plane-identities-file", filepath.Join(tempDir, "dataPlaneIdentities.json"),
+				"--auto-node",
 			},
 		},
 	} {
@@ -481,6 +495,59 @@ func TestCreateCluster(t *testing.T) {
 			testutil.CompareWithFixture(t, manifests)
 		})
 	}
+}
+
+func TestCreateClusterAutoNodeRequiresKarpenterClientID(t *testing.T) {
+	utilrand.Seed(1234567890)
+	certs.UnsafeSeed(1234567890)
+	ctx := framework.InterruptableContext(t.Context())
+	t.Setenv("FAKE_CLIENT", "true")
+	g := NewGomegaWithT(t)
+
+	credentialsFile, _, pullSecretFile := setupAzureTestFixtures(t)
+	tempDir := t.TempDir()
+
+	rawInfra, err := json.Marshal(&azureinfra.CreateInfraOutput{
+		BaseDomain:        "fakeBaseDomain",
+		PublicZoneID:      "fakePublicZoneID",
+		PrivateZoneID:     "fakePrivateZoneID",
+		Location:          "fakeLocation",
+		ResourceGroupName: "fakeResourceGroupName",
+		VNetID:            "fakeVNetID",
+		SubnetID:          "fakeSubnetID",
+		BootImageID:       "fakeBootImageID",
+		InfraID:           "fakeInfraID",
+		SecurityGroupID:   "fakeSecurityGroupID",
+		ControlPlaneMIs:   &hyperv1.AzureResourceManagedIdentities{},
+	})
+	g.Expect(err).NotTo(HaveOccurred())
+	infraFile := filepath.Join(tempDir, "infra.json")
+	g.Expect(os.WriteFile(infraFile, rawInfra, 0600)).To(Succeed())
+
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	coreOpts := core.DefaultOptions()
+	core.BindDeveloperOptions(coreOpts, flags)
+	azureOpts := DefaultOptions()
+	azurenodepool.BindOptions(azureOpts.NodePoolOpts, flags)
+	BindDeveloperOptions(azureOpts, flags)
+
+	err = flags.Parse([]string{
+		"--azure-creds=" + credentialsFile,
+		"--infra-json=" + infraFile,
+		"--name=example",
+		"--pull-secret=" + pullSecretFile,
+		"--managed-identities-file", filepath.Join(tempDir, "managedIdentities.json"),
+		"--data-plane-identities-file", filepath.Join(tempDir, "dataPlaneIdentities.json"),
+		"--auto-node",
+	})
+	g.Expect(err).NotTo(HaveOccurred())
+
+	coreOpts.Render = true
+	coreOpts.RenderInto = filepath.Join(t.TempDir(), "manifests.yaml")
+
+	err = core.CreateCluster(ctx, coreOpts, azureOpts)
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("autoNode on Azure requires a Karpenter workload identity"))
 }
 
 func TestValidateOAuthPublishingStrategy(t *testing.T) {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -19,7 +18,6 @@ import (
 	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/controllers/resources/kas"
 	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/controllers/resources/manifests"
 	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/controllers/resources/registry"
-	"github.com/openshift/hypershift/hypershift-operator/controllers/nodepool"
 	"github.com/openshift/hypershift/support/azureutil"
 	"github.com/openshift/hypershift/support/globalconfig"
 	"github.com/openshift/hypershift/support/k8sutil"
@@ -34,7 +32,6 @@ import (
 	openshiftcpv1 "github.com/openshift/api/openshiftcontrolplane/v1"
 	operatorv1 "github.com/openshift/api/operator/v1"
 
-	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -54,9 +51,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
+	operatorsv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	"go.uber.org/zap/zaptest"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -95,7 +94,6 @@ var initialObjects = []client.Object{
 	},
 	manifests.NodeTuningClusterOperator(),
 	manifests.NamespaceKubeSystem(),
-	manifests.UserCABundle(),
 	manifests.OpenShiftUserCABundle(),
 	&configv1.ClusterVersion{ObjectMeta: metav1.ObjectMeta{Name: "version"}},
 	manifests.ValidatingAdmissionPolicy(kas.AdmissionPolicyNameConfig),
@@ -107,7 +105,11 @@ var initialObjects = []client.Object{
 	manifests.ValidatingAdmissionPolicyBinding(fmt.Sprintf("%s-binding", kas.AdmissionPolicyNameMirror)),
 	manifests.ValidatingAdmissionPolicyBinding(fmt.Sprintf("%s-binding", kas.AdmissionPolicyNameICSP)),
 	manifests.ValidatingAdmissionPolicyBinding(fmt.Sprintf("%s-binding", kas.AdmissionPolicyNameInfra)),
+	manifests.ValidatingAdmissionPolicyBinding(fmt.Sprintf("%s-binding", kas.AdmissionPolicyNameNTOMirroredConfigs)),
+	manifests.ValidatingAdmissionPolicy(kas.AdmissionPolicyNameRBAC),
+	manifests.ValidatingAdmissionPolicyBinding(fmt.Sprintf("%s-binding", kas.AdmissionPolicyNameRBAC)),
 
+	&operatorsv1alpha1.CatalogSource{ObjectMeta: metav1.ObjectMeta{Name: "redhat-marketplace", Namespace: "openshift-marketplace"}},
 	fakeOperatorHub(),
 	manifests.KASConnectionCheckerDeployment(),
 	manifests.KASConnectionCheckerServiceAccount(),
@@ -264,13 +266,13 @@ func TestReconcileOLM(t *testing.T) {
 		want                *configv1.OperatorHubSpec
 	}{
 		{
-			name:                "PlacementStrategy is management and no configuration provided",
+			name:                "When placement is management with no configuration, it should return empty OperatorHub spec",
 			hcpClusterConfig:    nil,
 			olmCatalogPlacement: hyperv1.ManagementOLMCatalogPlacement,
 			want:                &configv1.OperatorHubSpec{},
 		},
 		{
-			name: "PlacementStrategy is management and allDefaultSources disabled",
+			name: "When placement is management with allDefaultSources disabled, it should disable all default sources",
 			hcpClusterConfig: &hyperv1.ClusterConfiguration{
 				OperatorHub: &configv1.OperatorHubSpec{
 					DisableAllDefaultSources: true,
@@ -282,7 +284,7 @@ func TestReconcileOLM(t *testing.T) {
 			},
 		},
 		{
-			name: "PlacementStrategy is management and allDefaultSources enabled",
+			name: "When placement is management with allDefaultSources enabled, it should enable all default sources",
 			hcpClusterConfig: &hyperv1.ClusterConfiguration{
 				OperatorHub: &configv1.OperatorHubSpec{
 					DisableAllDefaultSources: false,
@@ -294,7 +296,7 @@ func TestReconcileOLM(t *testing.T) {
 			},
 		},
 		{
-			name:                "PlacementStrategy is guest and no configuration provided",
+			name:                "When placement is guest with no configuration, it should return empty OperatorHub spec",
 			hcpClusterConfig:    nil,
 			olmCatalogPlacement: hyperv1.GuestOLMCatalogPlacement,
 			want:                &configv1.OperatorHubSpec{},
@@ -302,7 +304,7 @@ func TestReconcileOLM(t *testing.T) {
 		{
 			// We expect here the OperatorHub in guest to keep the already set value and
 			// don't overwrite the value with the new one.
-			name: "PlacementStrategy is guest and allDefaultSources disabled, the first reconciliation loop already happened",
+			name: "When placement is guest with allDefaultSources disabled after first reconcile, it should preserve existing value",
 			hcpClusterConfig: &hyperv1.ClusterConfiguration{
 				OperatorHub: &configv1.OperatorHubSpec{
 					DisableAllDefaultSources: true,
@@ -314,7 +316,7 @@ func TestReconcileOLM(t *testing.T) {
 			},
 		},
 		{
-			name: "PlacementStrategy is guest and allDefaultSources enabled",
+			name: "When placement is guest with allDefaultSources enabled, it should enable all default sources",
 			hcpClusterConfig: &hyperv1.ClusterConfiguration{
 				OperatorHub: &configv1.OperatorHubSpec{
 					DisableAllDefaultSources: false,
@@ -363,6 +365,112 @@ type simpleCreateOrUpdater struct{}
 
 func (*simpleCreateOrUpdater) CreateOrUpdate(ctx context.Context, c client.Client, obj client.Object, f controllerutil.MutateFn) (controllerutil.OperationResult, error) {
 	return controllerutil.CreateOrUpdate(ctx, c, obj, f)
+}
+
+func TestReconcileIngressControllerCertSource(t *testing.T) {
+	ctx := t.Context()
+
+	customData := map[string][]byte{
+		corev1.TLSCertKey:       []byte("custom-cert"),
+		corev1.TLSPrivateKeyKey: []byte("custom-key"),
+	}
+	wildcardData := map[string][]byte{
+		corev1.TLSCertKey:       []byte("wildcard-cert"),
+		corev1.TLSPrivateKeyKey: []byte("wildcard-key"),
+	}
+
+	newHCP := func(withCustom bool) *hyperv1.HostedControlPlane {
+		hcp := fakeHCP()
+		hcp.Spec.Platform.Type = hyperv1.NonePlatform
+		hcp.Spec.DNS.BaseDomain = "example.com"
+		if withCustom {
+			hcp.Spec.OperatorConfiguration = &hyperv1.OperatorConfiguration{
+				IngressOperator: &hyperv1.IngressOperatorSpec{
+					DefaultCertificate: hyperv1.IngressDefaultCertificateReference{Name: "my-cert"},
+				},
+			}
+		}
+		return hcp
+	}
+
+	wildcardSource := func() *corev1.Secret {
+		s := cpomanifests.IngressCert("bar")
+		s.Type = corev1.SecretTypeTLS
+		s.Data = wildcardData
+		return s
+	}
+	customSource := func() *corev1.Secret {
+		s := cpomanifests.ServiceProviderDefaultIngressServingCert("bar")
+		s.Type = corev1.SecretTypeTLS
+		s.Data = customData
+		return s
+	}
+	existingGuestCert := func() *corev1.Secret {
+		s := manifests.IngressDefaultIngressControllerCert()
+		s.Type = corev1.SecretTypeTLS
+		s.Data = wildcardData
+		return s
+	}
+
+	testCases := []struct {
+		name         string
+		hcp          *hyperv1.HostedControlPlane
+		cpObjects    []client.Object
+		guestObjects []client.Object
+		// expectCert is the tls.crt expected in the guest default-ingress-cert secret.
+		expectCert []byte
+	}{
+		{
+			name:       "When no custom certificate is configured, it should sync the generated wildcard certificate",
+			hcp:        newHCP(false),
+			cpObjects:  []client.Object{wildcardSource()},
+			expectCert: wildcardData[corev1.TLSCertKey],
+		},
+		{
+			name:       "When a custom certificate is configured and synced, it should use the custom certificate",
+			hcp:        newHCP(true),
+			cpObjects:  []client.Object{customSource()},
+			expectCert: customData[corev1.TLSCertKey],
+		},
+		{
+			name:         "When a custom certificate is configured but not yet synced, it should not error and preserve the existing certificate",
+			hcp:          newHCP(true),
+			cpObjects:    []client.Object{},
+			guestObjects: []client.Object{existingGuestCert()},
+			expectCert:   wildcardData[corev1.TLSCertKey],
+		},
+		{
+			name: "When a custom certificate is configured on IBM Cloud, it should ignore it and use the generated wildcard certificate",
+			hcp: func() *hyperv1.HostedControlPlane {
+				hcp := newHCP(true)
+				hcp.Spec.Platform.Type = hyperv1.IBMCloudPlatform
+				return hcp
+			}(),
+			cpObjects:  []client.Object{wildcardSource(), customSource()},
+			expectCert: wildcardData[corev1.TLSCertKey],
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			cpClient := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(append(tc.cpObjects, tc.hcp)...).Build()
+			guestClient := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(tc.guestObjects...).Build()
+			r := &reconciler{
+				client:                 guestClient,
+				cpClient:               cpClient,
+				CreateOrUpdateProvider: &simpleCreateOrUpdater{},
+			}
+
+			// A missing custom certificate must not fail reconciliation, so the
+			// HostedCluster does not become degraded.
+			g.Expect(r.reconcileIngressController(ctx, tc.hcp)).To(Succeed())
+
+			guestCert := manifests.IngressDefaultIngressControllerCert()
+			g.Expect(guestClient.Get(ctx, client.ObjectKeyFromObject(guestCert), guestCert)).To(Succeed())
+			g.Expect(guestCert.Data[corev1.TLSCertKey]).To(Equal(tc.expectCert))
+		})
+	}
 }
 
 func fakeHCP() *hyperv1.HostedControlPlane {
@@ -504,7 +612,7 @@ func TestReconcileKubeadminPasswordHashSecret(t *testing.T) {
 		expectKubeadminPasswordHashSecretToExist bool
 		expectHashPreserved                      bool
 	}{
-		"when kubeadminPasswordSecret exists the hash secret is created": {
+		"When kubeadminPasswordSecret exists, it should create the hash secret": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -580,7 +688,7 @@ func TestReconcileKubeadminPasswordHashSecret(t *testing.T) {
 			expectKubeadminPasswordHashSecretToExist: true,
 			expectHashPreserved:                      true,
 		},
-		"when kubeadminPasswordSecret doesn't exist the hash secret is not created": {
+		"When kubeadminPasswordSecret does not exist, it should not create the hash secret": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -634,94 +742,6 @@ func TestReconcileKubeadminPasswordHashSecret(t *testing.T) {
 			actualOauthDeployment := manifests.OAuthDeployment(testNamespace)
 			err = r.cpClient.Get(t.Context(), client.ObjectKeyFromObject(actualOauthDeployment), actualOauthDeployment)
 			g.Expect(err).To(BeNil())
-		})
-	}
-}
-
-func TestReconcileUserCertCABundle(t *testing.T) {
-	t.Parallel()
-	testNamespace := "master-cluster1"
-	testHCPName := "cluster1"
-	tests := map[string]struct {
-		inputHCP              *hyperv1.HostedControlPlane
-		inputObjects          []client.Object
-		existingGuestObjects  []client.Object
-		expectUserCAConfigMap bool
-	}{
-		"No AdditionalTrustBundle": {
-			inputHCP: &hyperv1.HostedControlPlane{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      testHCPName,
-					Namespace: testNamespace,
-				},
-			},
-			inputObjects:          []client.Object{},
-			existingGuestObjects:  []client.Object{},
-			expectUserCAConfigMap: false,
-		},
-		"AdditionalTrustBundle": {
-			inputHCP: &hyperv1.HostedControlPlane{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      testHCPName,
-					Namespace: testNamespace,
-				},
-				Spec: hyperv1.HostedControlPlaneSpec{
-					AdditionalTrustBundle: &corev1.LocalObjectReference{
-						Name: cpomanifests.UserCAConfigMap(testNamespace).Name,
-					},
-				},
-			},
-			inputObjects: []client.Object{
-				&corev1.ConfigMap{
-					ObjectMeta: cpomanifests.UserCAConfigMap(testNamespace).ObjectMeta,
-					Data: map[string]string{
-						"ca-bundle.crt": "acertxyz",
-					},
-				},
-			},
-			existingGuestObjects:  []client.Object{},
-			expectUserCAConfigMap: true,
-		},
-		"AdditionalTrustBundle removed - should delete existing user-ca-bundle": {
-			inputHCP: &hyperv1.HostedControlPlane{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      testHCPName,
-					Namespace: testNamespace,
-				},
-			},
-			inputObjects: []client.Object{},
-			existingGuestObjects: []client.Object{
-				&corev1.ConfigMap{
-					ObjectMeta: manifests.UserCABundle().ObjectMeta,
-					Data: map[string]string{
-						"ca-bundle.crt": "oldcertdata",
-					},
-				},
-			},
-			expectUserCAConfigMap: false,
-		},
-	}
-	for name, test := range tests {
-		t.Run(name, func(t *testing.T) {
-			g := NewGomegaWithT(t)
-			r := &reconciler{
-				client:                 fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(test.existingGuestObjects...).Build(),
-				CreateOrUpdateProvider: &simpleCreateOrUpdater{},
-				cpClient:               fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(append(test.inputObjects, test.inputHCP)...).Build(),
-				hcpName:                testHCPName,
-				hcpNamespace:           testNamespace,
-			}
-			err := r.reconcileUserCertCABundle(t.Context(), test.inputHCP)
-			g.Expect(err).To(BeNil())
-			guestUserCABundle := manifests.UserCABundle()
-			if test.expectUserCAConfigMap {
-				err := r.client.Get(t.Context(), client.ObjectKeyFromObject(guestUserCABundle), guestUserCABundle)
-				g.Expect(err).To(BeNil())
-				g.Expect(len(guestUserCABundle.Data["ca-bundle.crt"]) > 0).To(BeTrue())
-			} else {
-				err := r.client.Get(t.Context(), client.ObjectKeyFromObject(guestUserCABundle), guestUserCABundle)
-				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
-			}
 		})
 	}
 }
@@ -925,18 +945,18 @@ func TestDestroyCloudResources(t *testing.T) {
 		verifyDoneCond   bool
 	}{
 		{
-			name:           "no existing resources",
+			name:           "When no resources exist, it should mark done condition",
 			verifyDoneCond: true,
 		},
 		{
-			name: "image registry with storage",
+			name: "When image registry has managed storage, it should set management state to removed",
 			existing: []client.Object{
 				managedImageRegistry(),
 			},
 			verify: verifyImageRegistryConfig,
 		},
 		{
-			name: "existing ingress controller",
+			name: "When ingress controllers exist, it should remove all ingress controllers",
 			existing: []client.Object{
 				ingressController("default"),
 				ingressController("foobar"),
@@ -944,7 +964,7 @@ func TestDestroyCloudResources(t *testing.T) {
 			verify: verifyIngressControllersRemoved,
 		},
 		{
-			name: "existing service load balancers",
+			name: "When service load balancers exist, it should remove load balancers but preserve ClusterIP services",
 			existing: []client.Object{
 				serviceLoadBalancer("foo"),
 				serviceLoadBalancer("bar"),
@@ -957,7 +977,7 @@ func TestDestroyCloudResources(t *testing.T) {
 			verifyDoneCond: true,
 		},
 		{
-			name: "existing service load balancers owned by ingress controller",
+			name: "When load balancers are owned by ingress controller, it should preserve them",
 			existing: []client.Object{
 				serviceLoadBalancerOwnedByIngressController("bar"),
 				clusterIPService("baz"),
@@ -968,7 +988,7 @@ func TestDestroyCloudResources(t *testing.T) {
 			},
 		},
 		{
-			name: "existing pv/pvc",
+			name: "When PVs and PVCs exist, it should remove PVCs and pods",
 			existing: []client.Object{
 				pv("foo"), pvc("foo"),
 				pv("bar"), pvc("bar"),
@@ -982,7 +1002,7 @@ func TestDestroyCloudResources(t *testing.T) {
 			},
 		},
 		{
-			name: "existing everything",
+			name: "When all resource types exist, it should clean up everything",
 			existing: []client.Object{
 				managedImageRegistry(),
 				ingressController("default"),
@@ -1066,12 +1086,12 @@ func TestDestroyCloudResourcesWithKASUnavailable(t *testing.T) {
 		expectFailureTracking bool
 	}{
 		{
-			name:                 "KAS deployment not found - cleanup skipped",
+			name:                 "When KAS deployment is not found, it should skip cleanup",
 			kasDeploymentExists:  false,
 			expectCleanupSkipped: true,
 		},
 		{
-			name:                 "KAS deployment exists - cleanup proceeds",
+			name:                 "When KAS deployment exists, it should proceed with cleanup",
 			kasDeploymentExists:  true,
 			expectCleanupSkipped: false,
 		},
@@ -1140,22 +1160,22 @@ func TestConnectionErrorTracking(t *testing.T) {
 		expectedConnection bool
 	}{
 		{
-			name:               "K8s timeout error",
+			name:               "When K8s timeout error occurs, it should return true",
 			err:                apierrors.NewTimeoutError("request timeout", 5),
 			expectedConnection: true,
 		},
 		{
-			name:               "K8s server timeout error",
+			name:               "When K8s server timeout error occurs, it should return true",
 			err:                apierrors.NewServerTimeout(schema.GroupResource{Group: "", Resource: "pods"}, "get", 5),
 			expectedConnection: true,
 		},
 		{
-			name:               "K8s service unavailable error",
+			name:               "When K8s service unavailable error occurs, it should return true",
 			err:                apierrors.NewServiceUnavailable("service unavailable"),
 			expectedConnection: true,
 		},
 		{
-			name: "net.Error with timeout",
+			name: "When net.Error has timeout, it should return true",
 			err: &mockNetError{
 				error:   fmt.Errorf("connection timeout"),
 				timeout: true,
@@ -1163,7 +1183,7 @@ func TestConnectionErrorTracking(t *testing.T) {
 			expectedConnection: true,
 		},
 		{
-			name: "net.Error temporary",
+			name: "When net.Error is temporary, it should return true",
 			err: &mockNetError{
 				error:     fmt.Errorf("temporary network error"),
 				temporary: true,
@@ -1171,22 +1191,22 @@ func TestConnectionErrorTracking(t *testing.T) {
 			expectedConnection: true,
 		},
 		{
-			name:               "wrapped net.Error",
+			name:               "When net.Error is wrapped, it should return true",
 			err:                fmt.Errorf("failed to connect: %w", &mockNetError{error: fmt.Errorf("connection refused"), timeout: false}),
 			expectedConnection: true,
 		},
 		{
-			name:               "other K8s error (not found)",
+			name:               "When K8s error is not found, it should return false",
 			err:                apierrors.NewNotFound(schema.GroupResource{Group: "", Resource: "pods"}, "test-pod"),
 			expectedConnection: false,
 		},
 		{
-			name:               "other error",
+			name:               "When error is generic, it should return false",
 			err:                fmt.Errorf("permission denied"),
 			expectedConnection: false,
 		},
 		{
-			name:               "nil error",
+			name:               "When error is nil, it should return false",
 			err:                nil,
 			expectedConnection: false,
 		},
@@ -1458,6 +1478,81 @@ func TestReconcileClusterVersionWithEnabledCapabilities(t *testing.T) {
 	g.Expect(clusterVersion.Spec.Capabilities).To(Equal(expectedCapabilities))
 }
 
+func TestReconcileClusterVersionWhenGuestCVOHasOlderCapabilities(t *testing.T) {
+	t.Parallel()
+	hcp := &hyperv1.HostedControlPlane{
+		Spec: hyperv1.HostedControlPlaneSpec{
+			ClusterID: "test-cluster-id",
+		},
+	}
+	// Simulate an older guest CVO that doesn't know about ClusterAPI or CompatibilityRequirements
+	olderCVOKnownCaps := []configv1.ClusterVersionCapability{
+		configv1.ClusterVersionCapabilityBuild,
+		configv1.ClusterVersionCapabilityCSISnapshot,
+		configv1.ClusterVersionCapabilityCloudControllerManager,
+		configv1.ClusterVersionCapabilityCloudCredential,
+		configv1.ClusterVersionCapabilityConsole,
+		configv1.ClusterVersionCapabilityDeploymentConfig,
+		configv1.ClusterVersionCapabilityImageRegistry,
+		configv1.ClusterVersionCapabilityIngress,
+		configv1.ClusterVersionCapabilityInsights,
+		configv1.ClusterVersionCapabilityMachineAPI,
+		configv1.ClusterVersionCapabilityNodeTuning,
+		configv1.ClusterVersionCapabilityOperatorLifecycleManager,
+		configv1.ClusterVersionCapabilityOperatorLifecycleManagerV1,
+		configv1.ClusterVersionCapabilityStorage,
+		configv1.ClusterVersionCapabilityBaremetal,
+		configv1.ClusterVersionCapabilityMarketplace,
+		configv1.ClusterVersionCapabilityOpenShiftSamples,
+	}
+	clusterVersion := &configv1.ClusterVersion{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "version",
+		},
+		Status: configv1.ClusterVersionStatus{
+			Capabilities: configv1.ClusterVersionCapabilitiesStatus{
+				KnownCapabilities: olderCVOKnownCaps,
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(clusterVersion).Build()
+	g := NewWithT(t)
+	r := &reconciler{
+		client:                 fakeClient,
+		CreateOrUpdateProvider: &simpleCreateOrUpdater{},
+	}
+	err := r.reconcileClusterVersion(t.Context(), hcp)
+	g.Expect(err).ToNot(HaveOccurred())
+	err = fakeClient.Get(t.Context(), client.ObjectKeyFromObject(clusterVersion), clusterVersion)
+	g.Expect(err).ToNot(HaveOccurred())
+
+	// ClusterAPI and CompatibilityRequirements should be filtered out
+	expectedCapabilities := &configv1.ClusterVersionCapabilitiesSpec{
+		BaselineCapabilitySet: configv1.ClusterVersionCapabilitySetNone,
+		AdditionalEnabledCapabilities: []configv1.ClusterVersionCapability{
+			configv1.ClusterVersionCapabilityBuild,
+			configv1.ClusterVersionCapabilityCSISnapshot,
+			configv1.ClusterVersionCapabilityCloudControllerManager,
+			configv1.ClusterVersionCapabilityCloudCredential,
+			// ClusterAPI filtered out - not in knownCapabilities
+			// CompatibilityRequirements filtered out - not in knownCapabilities
+			configv1.ClusterVersionCapabilityConsole,
+			configv1.ClusterVersionCapabilityDeploymentConfig,
+			configv1.ClusterVersionCapabilityImageRegistry,
+			configv1.ClusterVersionCapabilityIngress,
+			configv1.ClusterVersionCapabilityInsights,
+			configv1.ClusterVersionCapabilityMachineAPI,
+			configv1.ClusterVersionCapabilityNodeTuning,
+			configv1.ClusterVersionCapabilityOperatorLifecycleManager,
+			configv1.ClusterVersionCapabilityOperatorLifecycleManagerV1,
+			configv1.ClusterVersionCapabilityStorage,
+			configv1.ClusterVersionCapabilityMarketplace,
+			configv1.ClusterVersionCapabilityOpenShiftSamples,
+		},
+	}
+	g.Expect(clusterVersion.Spec.Capabilities).To(Equal(expectedCapabilities))
+}
+
 func TestReconcileImageContentPolicyType(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {
@@ -1466,15 +1561,15 @@ func TestReconcileImageContentPolicyType(t *testing.T) {
 		removeICSAndReconcile bool
 	}{
 		{
-			name: "ICS with content, it should return an IDMS with the same content",
+			name: "When ICS has content, it should return an IDMS with the same content",
 			hcp:  withICS(fakeHCP()),
 		},
 		{
-			name: "ICS empty, is should return an empty IDMS",
+			name: "When ICS is empty, it should return an empty IDMS",
 			hcp:  fakeHCP(),
 		},
 		{
-			name:                  "ICS And IDMS should be in sync always",
+			name:                  "When ICS is removed after reconcile, it should sync IDMS to match",
 			hcp:                   withICS(fakeHCP()),
 			removeICSAndReconcile: true,
 		},
@@ -1541,7 +1636,7 @@ func TestReconcileKASEndpoints(t *testing.T) {
 		expectedPort int32
 	}{
 		{
-			name: "When HC has hcp.spec.networking.apiServer.port set to 443, endpoint and slice should have port 443",
+			name: "When HC has hcp.spec.networking.apiServer.port set to 443, it should set endpoint and slice port to 443",
 			hcp: &hyperv1.HostedControlPlane{
 				Spec: hyperv1.HostedControlPlaneSpec{
 					Networking: hyperv1.ClusterNetworking{
@@ -1554,7 +1649,7 @@ func TestReconcileKASEndpoints(t *testing.T) {
 			expectedPort: int32(443),
 		},
 		{
-			name: "When HC has no hcp.spec.networking.apiServer.port set, endpoint and slice should have port 6443",
+			name: "When HC has no hcp.spec.networking.apiServer.port set, it should set endpoint and slice port to 6443",
 			hcp: &hyperv1.HostedControlPlane{
 				Spec: hyperv1.HostedControlPlaneSpec{},
 			},
@@ -1613,7 +1708,7 @@ func TestReconcileKubeletConfig(t *testing.T) {
 		preservedObjects               []client.Object
 	}{
 		{
-			name: "copy kubelet config from control plane NS",
+			name: "When kubelet config exists in control plane namespace, it should copy to hosted cluster",
 			hostedControlPlaneObjects: []client.Object{
 				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcpNamespace, kubeletConfig1),
 			},
@@ -1622,7 +1717,7 @@ func TestReconcileKubeletConfig(t *testing.T) {
 			},
 		},
 		{
-			name: "some CM already exist and some are not, expect HCCO to catch up",
+			name: "When some ConfigMaps already exist, it should reconcile missing ones",
 			hostedControlPlaneObjects: []client.Object{
 				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcpNamespace, kubeletConfig1),
 				makeKubeletConfigConfigMap(netutil.ShortenName("foo", npName2, validation.LabelValueMaxLength), hcpNamespace, kubeletConfig1),
@@ -1636,7 +1731,7 @@ func TestReconcileKubeletConfig(t *testing.T) {
 			},
 		},
 		{
-			name: "CM need to be deleted",
+			name: "When ConfigMaps are removed from source, it should delete from hosted cluster",
 			hostedControlPlaneObjects: []client.Object{
 				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcpNamespace, kubeletConfig1),
 			},
@@ -1711,8 +1806,8 @@ func TestReconcileKubeletConfig(t *testing.T) {
 						Name:      "orphan-no-np-label",
 						Namespace: hcNamespace,
 						Labels: map[string]string{
-							nodepool.KubeletConfigConfigMapLabel: "true",
-							nodepool.NTOMirroredConfigLabel:      "true",
+							hyperv1.KubeletConfigConfigMapLabel: "true",
+							hyperv1.NTOMirroredConfigLabel:      "true",
 						},
 					},
 					Data: map[string]string{"config": kubeletConfig1},
@@ -1724,8 +1819,8 @@ func TestReconcileKubeletConfig(t *testing.T) {
 						Name:      "orphan-no-np-label",
 						Namespace: hcNamespace,
 						Labels: map[string]string{
-							nodepool.KubeletConfigConfigMapLabel: "true",
-							nodepool.NTOMirroredConfigLabel:      "true",
+							hyperv1.KubeletConfigConfigMapLabel: "true",
+							hyperv1.NTOMirroredConfigLabel:      "true",
 						},
 					},
 					Data: map[string]string{"config": kubeletConfig1},
@@ -1799,7 +1894,7 @@ func TestReconcileKubeletConfig(t *testing.T) {
 			listOpts := []client.ListOption{
 				client.InNamespace(hcNamespace),
 				client.MatchingLabels{
-					nodepool.KubeletConfigConfigMapLabel: "true",
+					hyperv1.KubeletConfigConfigMapLabel: "true",
 				},
 			}
 			cmList := &corev1.ConfigMapList{}
@@ -1824,7 +1919,7 @@ func TestBuildAWSWebIdentityCredentials(t *testing.T) {
 	}
 	tests := []test{
 		{
-			name: "should fail if the role ARN is empty",
+			name: "When role ARN is empty, it should return error",
 			args: args{
 				roleArn: "",
 				region:  "us-east-1",
@@ -1832,7 +1927,7 @@ func TestBuildAWSWebIdentityCredentials(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "should fail if the region is empty",
+			name:    "When region is empty, it should return error",
 			wantErr: true,
 			args: args{
 				roleArn: "arn:aws:iam::123456789012:role/some-role",
@@ -1840,7 +1935,7 @@ func TestBuildAWSWebIdentityCredentials(t *testing.T) {
 			},
 		},
 		{
-			name:    "should succeed and return the creds template populated with role arn and region otherwise",
+			name:    "When role ARN and region are valid, it should return populated credentials template",
 			wantErr: false,
 			args: args{
 				roleArn: "arn:aws:iam::123456789012:role/some-role",
@@ -1874,7 +1969,7 @@ func makeKubeletConfigConfigMap(name, namespace, data string) *corev1.ConfigMap 
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				nodepool.KubeletConfigConfigMapLabel: "true",
+				hyperv1.KubeletConfigConfigMapLabel: "true",
 			},
 		},
 		Data: map[string]string{
@@ -1889,9 +1984,9 @@ func makeMirroredKubeletConfigConfigMap(name, namespace, nodePoolName, data stri
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				nodepool.KubeletConfigConfigMapLabel: "true",
-				nodepool.NTOMirroredConfigLabel:      "true",
-				hyperv1.NodePoolLabel:                nodePoolName,
+				hyperv1.KubeletConfigConfigMapLabel: "true",
+				hyperv1.NTOMirroredConfigLabel:      "true",
+				hyperv1.NodePoolLabel:               nodePoolName,
 			},
 		},
 		Data: map[string]string{
@@ -1906,7 +2001,7 @@ func makeImmutableKubeletConfigConfigMap(name, namespace, data string) *corev1.C
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				nodepool.KubeletConfigConfigMapLabel: "true",
+				hyperv1.KubeletConfigConfigMapLabel: "true",
 			},
 		},
 		Immutable: ptr.To(true),
@@ -1929,7 +2024,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 		expectedErrorMessages   []string
 		setAROHCP               bool
 	}{
-		"when OAuth is enabled, should not copy OIDC resources": {
+		"When OAuth is enabled, it should not copy OIDC resources": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -1955,7 +2050,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectOIDCClientSecrets: []string{},
 			expectErrors:            false,
 		},
-		"when OAuth is disabled and no OIDC providers, should not copy anything": {
+		"When OAuth is disabled with no OIDC providers, it should not copy anything": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -1974,7 +2069,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectOIDCClientSecrets: []string{},
 			expectErrors:            false,
 		},
-		"when OAuth is disabled with OIDC provider with CA configmap, should copy CA": {
+		"When OAuth is disabled with OIDC CA configmap, it should copy CA": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -2014,7 +2109,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectOIDCClientSecrets: []string{},
 			expectErrors:            false,
 		},
-		"when OAuth is disabled with OIDC provider with OIDC clients, should copy client secrets": {
+		"When OAuth is disabled with OIDC clients, it should copy client secrets": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -2078,7 +2173,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectOIDCClientSecrets: []string{"console-client-secret", "cli-client-secret"},
 			expectErrors:            false,
 		},
-		"when OAuth is disabled with OIDC provider with both CA and client secrets, should copy both": {
+		"When OAuth is disabled with OIDC CA and client secrets, it should copy both": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -2137,7 +2232,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectOIDCClientSecrets: []string{"console-client-secret"},
 			expectErrors:            false,
 		},
-		"when OAuth is disabled with OIDC provider with confidential and public OIDC clients, should copy confidential client secret": {
+		"When OAuth is disabled with mixed OIDC clients, it should copy only confidential client secret": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -2192,7 +2287,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectOIDCClientSecrets: []string{"console-client-secret"},
 			expectErrors:            false,
 		},
-		"when OAuth is disabled with OIDC provider with a hosted-cluster-sourced annotated client secret and ARO-HCP platform, should not copy the client secret": {
+		"When ARO-HCP has hosted-cluster-sourced client secret, it should not copy the secret": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -2254,7 +2349,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectErrors:            false,
 			setAROHCP:               true,
 		},
-		"when OAuth is disabled with OIDC provider and not ARO-HCP platform, setting hosted-cluster-sourced annotation on a client secret should not skip copying the secret": {
+		"When non-ARO-HCP has hosted-cluster-sourced annotation, it should still copy the secret": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -2305,7 +2400,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectErrors:            false,
 			setAROHCP:               false,
 		},
-		"when OAuth is disabled but CA configmap is missing, should return error": {
+		"When OAuth is disabled but CA configmap is missing, it should return error": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -2336,7 +2431,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectErrors:            true,
 			expectedErrorMessages:   []string{"failed to get issuer CA configmap missing-ca-bundle"},
 		},
-		"when OAuth is disabled but client secret is missing, should return error": {
+		"When OAuth is disabled but client secret is missing, it should return error": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -2374,7 +2469,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectErrors:            true,
 			expectedErrorMessages:   []string{"failed to get OIDCClient secret missing-client-secret"},
 		},
-		"when OAuth is disabled with multiple OIDC providers, should handle first provider only": {
+		"When OAuth is disabled with multiple OIDC providers, it should handle first provider only": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -2605,7 +2700,7 @@ func newCondition(conditionType string, status metav1.ConditionStatus, reason, m
 	}
 }
 
-func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
+func TestReconcileDataPlaneConnectionAvailable(t *testing.T) {
 	t.Parallel()
 	newKonnectivityAgentPod := func(name string, phase corev1.PodPhase) corev1.Pod {
 		return corev1.Pod{
@@ -2647,7 +2742,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 		mockedGetPodLogs  func(context context.Context, clientet *clientset.Clientset, namespace, name, container string) ([]byte, error)
 	}{
 		{
-			name:    "no worker nodes Condition Unknown",
+			name:    "When no worker nodes exist, it should set condition to Unknown",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(string(hyperv1.DataPlaneConnectionAvailable),
@@ -2661,7 +2756,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 			},
 		},
 		{
-			name:    "no konnectivity-agent PODs condition False",
+			name:    "When no konnectivity-agent pods exist, it should set condition to False",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(string(hyperv1.DataPlaneConnectionAvailable),
@@ -2676,7 +2771,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 			},
 		},
 		{
-			name:    "only one pending POD condition False",
+			name:    "When only pending konnectivity-agent pods exist, it should set condition to False",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(string(hyperv1.DataPlaneConnectionAvailable),
@@ -2691,7 +2786,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 			},
 		},
 		{
-			name:    "one konnectivity-agent PODs running condition OK",
+			name:    "When one konnectivity-agent pod is running, it should set condition to True",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(string(hyperv1.DataPlaneConnectionAvailable),
@@ -2706,7 +2801,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 			},
 		},
 		{
-			name:    "may konnectivity-agent PODs only one running condition OK",
+			name:    "When many konnectivity-agent pods exist with one running, it should set condition to True",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(string(hyperv1.DataPlaneConnectionAvailable),
@@ -2725,7 +2820,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 			},
 		},
 		{
-			name:    "one konnectivity-agent PODs running bad since error getting LOG",
+			name:    "When konnectivity-agent pod has log retrieval error, it should set condition to False",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(string(hyperv1.DataPlaneConnectionAvailable),
@@ -2741,7 +2836,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 			},
 		},
 		{
-			name:    "one konnectivity-agent PODs running bad since no LOG", // unsure this is possible
+			name:    "When konnectivity-agent pod has no log output, it should set condition to False", // unsure this is possible
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(string(hyperv1.DataPlaneConnectionAvailable),
@@ -2801,7 +2896,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 	}
 }
 
-func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
+func TestReconcileControlPlaneConnectionAvailable(t *testing.T) {
 	t.Parallel()
 	newConnectivityConfigMap := func(data map[string]string) *corev1.ConfigMap {
 		return &corev1.ConfigMap{
@@ -2838,7 +2933,7 @@ func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
 		nodes             []corev1.Node
 	}{
 		{
-			name:    "When no worker nodes exist it should set condition to Unknown with NoWorkerNodesAvailable reason",
+			name:    "When no worker nodes exist, it should set condition to Unknown with NoWorkerNodesAvailable reason",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(
@@ -2851,7 +2946,7 @@ func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
 			nodes:     []corev1.Node{},
 		},
 		{
-			name:    "When ConfigMap does not exist it should set condition to Unknown with ConfigMapNotFound reason",
+			name:    "When ConfigMap does not exist, it should set condition to Unknown with ConfigMapNotFound reason",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(
@@ -2865,7 +2960,7 @@ func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
 			nodes:     []corev1.Node{newReadyNode("node1")},
 		},
 		{
-			name:    "When ConfigMap has no lastSucceeded key it should set condition to False with KASAccessFailed reason",
+			name:    "When ConfigMap has no lastSucceeded key, it should set condition to False with KASAccessFailed reason",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(
@@ -2878,7 +2973,7 @@ func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
 			nodes:     []corev1.Node{newReadyNode("node1")},
 		},
 		{
-			name:    "When ConfigMap has empty lastSucceeded it should set condition to False with KASAccessFailed reason",
+			name:    "When ConfigMap has empty lastSucceeded, it should set condition to False with KASAccessFailed reason",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(
@@ -2891,7 +2986,7 @@ func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
 			nodes:     []corev1.Node{newReadyNode("node1")},
 		},
 		{
-			name:    "When lastSucceeded is recent it should set condition to True",
+			name:    "When lastSucceeded is recent, it should set condition to True",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(
@@ -2906,7 +3001,7 @@ func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
 			nodes: []corev1.Node{newReadyNode("node1")},
 		},
 		{
-			name:    "When lastSucceeded is stale it should set condition to False with ConnectionCheckStale reason",
+			name:    "When lastSucceeded is stale, it should set condition to False with ConnectionCheckStale reason",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(
@@ -3046,42 +3141,76 @@ func verifyKASCheckerPodSpec(t *testing.T, dep *appsv1.Deployment) {
 	}
 }
 
-func verifyKASCheckerTolerations(t *testing.T, dep *appsv1.Deployment) {
+func verifyKASCheckerNoTolerations(t *testing.T, dep *appsv1.Deployment) {
 	t.Helper()
-	expectedTolerations := []corev1.Toleration{
-		{
-			Operator: corev1.TolerationOpExists,
-			Effect:   corev1.TaintEffectNoSchedule,
-		},
-		{
-			Key:               "node.kubernetes.io/unreachable",
-			Operator:          corev1.TolerationOpExists,
-			Effect:            corev1.TaintEffectNoExecute,
-			TolerationSeconds: ptr.To[int64](120),
-		},
-		{
-			Key:               "node.kubernetes.io/not-ready",
-			Operator:          corev1.TolerationOpExists,
-			Effect:            corev1.TaintEffectNoExecute,
-			TolerationSeconds: ptr.To[int64](120),
-		},
+	// No custom tolerations — the previous blanket NoSchedule toleration
+	// matched the cordon taint, causing pods to be scheduled back onto
+	// cordoned nodes during drain.
+	if len(dep.Spec.Template.Spec.Tolerations) != 0 {
+		t.Errorf("Expected no tolerations, got %d", len(dep.Spec.Template.Spec.Tolerations))
 	}
-	if len(dep.Spec.Template.Spec.Tolerations) != len(expectedTolerations) {
-		t.Fatalf("Expected %d tolerations, got %d", len(expectedTolerations), len(dep.Spec.Template.Spec.Tolerations))
+}
+
+func verifyKASCheckerTopologySpread(t *testing.T, dep *appsv1.Deployment) {
+	t.Helper()
+	if len(dep.Spec.Template.Spec.TopologySpreadConstraints) != 1 {
+		t.Fatalf("Expected 1 topology spread constraint, got %d", len(dep.Spec.Template.Spec.TopologySpreadConstraints))
 	}
-	for i, expected := range expectedTolerations {
-		actual := dep.Spec.Template.Spec.Tolerations[i]
-		if actual.Operator != expected.Operator || actual.Effect != expected.Effect || actual.Key != expected.Key || !reflect.DeepEqual(actual.TolerationSeconds, expected.TolerationSeconds) {
-			t.Errorf("Toleration[%d] mismatch: got {Key:%q, Operator:%q, Effect:%q, TolerationSeconds:%v}, want {Key:%q, Operator:%q, Effect:%q, TolerationSeconds:%v}",
-				i, actual.Key, actual.Operator, actual.Effect, actual.TolerationSeconds, expected.Key, expected.Operator, expected.Effect, expected.TolerationSeconds)
-		}
+	tsc := dep.Spec.Template.Spec.TopologySpreadConstraints[0]
+	if tsc.MaxSkew != 1 {
+		t.Errorf("Expected MaxSkew 1, got %d", tsc.MaxSkew)
+	}
+	if tsc.TopologyKey != "kubernetes.io/hostname" {
+		t.Errorf("Expected TopologyKey kubernetes.io/hostname, got %s", tsc.TopologyKey)
+	}
+	if tsc.WhenUnsatisfiable != corev1.ScheduleAnyway {
+		t.Errorf("Expected WhenUnsatisfiable ScheduleAnyway, got %s", tsc.WhenUnsatisfiable)
+	}
+	if tsc.LabelSelector == nil || tsc.LabelSelector.MatchLabels["app"] != manifests.KASConnectionCheckerName {
+		t.Error("Expected LabelSelector to match app=kas-connection-checker")
 	}
 }
 
 func verifyKASCheckerAnnotations(t *testing.T, dep *appsv1.Deployment) {
 	t.Helper()
-	if dep.Spec.Template.ObjectMeta.Annotations["openshift.io/required-scc"] != "restricted-v2" {
-		t.Errorf("Expected openshift.io/required-scc annotation 'restricted-v2', got %s", dep.Spec.Template.ObjectMeta.Annotations["openshift.io/required-scc"])
+	// kube-system is exempt from SCC admission, so the annotation is inert there and
+	// would reject the explicit non-root UID if that exemption ever changed.
+	if got, ok := dep.Spec.Template.ObjectMeta.Annotations["openshift.io/required-scc"]; ok {
+		t.Errorf("openshift.io/required-scc annotation should not be set, got %s", got)
+	}
+}
+
+func verifyKASCheckerSecurityContext(t *testing.T, dep *appsv1.Deployment, container corev1.Container) {
+	t.Helper()
+	// A numeric UID is required: nothing assigns one in kube-system, and RunAsNonRoot
+	// alone would fail at the kubelet because the cli image declares no user.
+	podSecurityContext := dep.Spec.Template.Spec.SecurityContext
+	if podSecurityContext == nil || podSecurityContext.RunAsUser == nil {
+		t.Fatal("Pod SecurityContext should set RunAsUser")
+	}
+	if *podSecurityContext.RunAsUser != 1000 {
+		t.Errorf("Expected RunAsUser 1000, got %d", *podSecurityContext.RunAsUser)
+	}
+
+	if container.SecurityContext == nil {
+		t.Fatal("Container SecurityContext should be set")
+	}
+	if !ptr.Deref(container.SecurityContext.RunAsNonRoot, false) {
+		t.Error("RunAsNonRoot should be true")
+	}
+	if ptr.Deref(container.SecurityContext.AllowPrivilegeEscalation, true) {
+		t.Error("AllowPrivilegeEscalation should be false")
+	}
+	if !ptr.Deref(container.SecurityContext.ReadOnlyRootFilesystem, false) {
+		t.Error("ReadOnlyRootFilesystem should be true")
+	}
+	if container.SecurityContext.Capabilities == nil ||
+		len(container.SecurityContext.Capabilities.Drop) != 1 ||
+		container.SecurityContext.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("Expected all capabilities dropped, got %v", container.SecurityContext.Capabilities)
+	}
+	if dep.Spec.Template.ObjectMeta.Annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"] != "true" {
+		t.Error("Expected safe-to-evict annotation to be set to 'true'")
 	}
 }
 
@@ -3101,7 +3230,7 @@ func getKASCheckerDeployment(t *testing.T, c client.Client) *appsv1.Deployment {
 	return dep
 }
 
-func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
+func TestReconcileKASConnectionChecker(t *testing.T) {
 	t.Parallel()
 	const testCLIImage = "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:cli-test"
 
@@ -3113,7 +3242,7 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 		validate           func(t *testing.T, c client.Client)
 	}{
 		{
-			name:               "When Deployment does not exist it should create it with correct spec",
+			name:               "When Deployment does not exist, it should create it with correct spec",
 			hcp:                fakeHCP(),
 			existingDeployment: nil,
 			wantErr:            false,
@@ -3128,8 +3257,10 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 				}
 				verifyKASCheckerPodSpec(t, dep)
 				verifyKASCheckerResources(t, container)
-				verifyKASCheckerTolerations(t, dep)
+				verifyKASCheckerNoTolerations(t, dep)
 				verifyKASCheckerAnnotations(t, dep)
+				verifyKASCheckerSecurityContext(t, dep, container)
+				verifyKASCheckerTopologySpread(t, dep)
 
 				cm := &corev1.ConfigMap{}
 				if err := c.Get(context.Background(), client.ObjectKey{Name: manifests.KASConnectionCheckerConfigMapName, Namespace: manifests.KASConnectionCheckerNamespace}, cm); err != nil {
@@ -3138,7 +3269,7 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 			},
 		},
 		{
-			name: "When platform is IBM Cloud it should use IBM Cloud specific endpoint in curl script",
+			name: "When platform is IBM Cloud, it should use IBM Cloud specific endpoint in curl script",
 			hcp: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-hcp",
@@ -3162,7 +3293,7 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 			},
 		},
 		{
-			name: "When Deployment already exists it should update it",
+			name: "When Deployment already exists, it should update it",
 			hcp:  fakeHCP(),
 			existingDeployment: &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -3179,6 +3310,10 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{
 								"app": "old-label",
+							},
+							// Written by an older HCCO; must be cleared on upgrade.
+							Annotations: map[string]string{
+								"openshift.io/required-scc": "restricted-v2",
 							},
 						},
 						Spec: corev1.PodSpec{
@@ -3206,7 +3341,10 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 				if dep.Spec.Template.Spec.ServiceAccountName != manifests.KASConnectionCheckerName {
 					t.Errorf("Expected ServiceAccountName %s, got %s", manifests.KASConnectionCheckerName, dep.Spec.Template.Spec.ServiceAccountName)
 				}
+				verifyKASCheckerNoTolerations(t, dep)
 				verifyKASCheckerAnnotations(t, dep)
+				verifyKASCheckerSecurityContext(t, dep, container)
+				verifyKASCheckerTopologySpread(t, dep)
 			},
 		},
 	}
@@ -3215,7 +3353,7 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var r reconciler
 
-			// Setup fake client with existing Deployment if provided
+			// Setup fake client with existing objects if provided
 			var objects []client.Object
 			if tt.existingDeployment != nil {
 				objects = append(objects, tt.existingDeployment)
@@ -3224,10 +3362,10 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 			r.CreateOrUpdateProvider = &simpleCreateOrUpdater{}
 
 			ctx := context.Background()
-			err := r.reconcileKASConnectionCheckerDeployment(ctx, tt.hcp, testCLIImage)
+			err := r.reconcileKASConnectionChecker(ctx, tt.hcp, testCLIImage)
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("reconcileKASConnectionCheckerDeployment() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("reconcileKASConnectionChecker() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
@@ -3378,7 +3516,7 @@ func TestReconcileMetricsForwarder(t *testing.T) {
 	}
 }
 
-func Test_namespacedNamePredicateFunc(t *testing.T) {
+func TestNamespacedNamePredicateFunc(t *testing.T) {
 	predicate := namespacedNamePredicateFunc("my-hcp-namespace", "pull-secret")
 
 	tests := []struct {
@@ -3387,21 +3525,21 @@ func Test_namespacedNamePredicateFunc(t *testing.T) {
 		want   bool
 	}{
 		{
-			name: "When namespace and name match it should return true",
+			name: "When namespace and name match, it should return true",
 			object: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "my-hcp-namespace", Name: "pull-secret"},
 			},
 			want: true,
 		},
 		{
-			name: "When namespace differs it should return false",
+			name: "When namespace differs, it should return false",
 			object: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "other-namespace", Name: "pull-secret"},
 			},
 			want: false,
 		},
 		{
-			name: "When name differs it should return false",
+			name: "When name differs, it should return false",
 			object: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "my-hcp-namespace", Name: "other-secret"},
 			},
@@ -3415,6 +3553,17 @@ func Test_namespacedNamePredicateFunc(t *testing.T) {
 			g.Expect(predicate(tt.object)).To(Equal(tt.want))
 		})
 	}
+}
+
+func TestNotUserCABundlePredicate(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	p := notUserCABundlePredicate()
+
+	g.Expect(p.Create(event.TypedCreateEvent[client.Object]{Object: manifests.UserCABundle()})).To(BeFalse())
+	g.Expect(p.Create(event.TypedCreateEvent[client.Object]{Object: &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "openshift-config", Name: "another-config"},
+	}})).To(BeTrue())
 }
 
 func TestReconcileDeletion(t *testing.T) {
@@ -3995,270 +4144,6 @@ func TestCleanupLegacyResources(t *testing.T) {
 				g.Expect(apierrors.IsNotFound(getErr)).To(BeTrue(), "DNS operator deployment should be deleted")
 			} else {
 				g.Expect(getErr).ToNot(HaveOccurred(), "DNS operator deployment should still exist")
-			}
-		})
-	}
-}
-
-func TestIsAllowedWebhookUrl(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name           string
-		disallowedUrls []string
-		url            string
-		expected       bool
-	}{
-		{
-			name:           "When URL contains a disallowed substring it should return false",
-			disallowedUrls: []string{"https://etcd-client"},
-			url:            "https://etcd-client:2379",
-			expected:       false,
-		},
-		{
-			name:           "When URL matches a fully qualified disallowed URL it should return false",
-			disallowedUrls: []string{"https://etcd-client.ns.svc"},
-			url:            "https://etcd-client.ns.svc:2379/path",
-			expected:       false,
-		},
-		{
-			name:           "When URL does not match any disallowed URL it should return true",
-			disallowedUrls: []string{"https://etcd-client"},
-			url:            "https://external.example.com",
-			expected:       true,
-		},
-		{
-			name:           "When disallowed list is empty it should return true",
-			disallowedUrls: []string{},
-			url:            "https://anything",
-			expected:       true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
-			result := isAllowedWebhookUrl(tt.disallowedUrls, tt.url)
-			g.Expect(result).To(Equal(tt.expected))
-		})
-	}
-}
-
-func TestEnsureGuestAdmissionWebhooksAreValid(t *testing.T) {
-	t.Parallel()
-	const hcpNamespace = "test-hcp-namespace"
-
-	tests := []struct {
-		name               string
-		cpServices         []corev1.Service
-		guestObjects       []client.Object
-		expectWebhookGone  string
-		expectWebhookAlive string
-	}{
-		{
-			name: "When validating webhook targets a CP service it should delete the webhook",
-			cpServices: []corev1.Service{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "etcd-client",
-						Namespace: hcpNamespace,
-					},
-				},
-			},
-			guestObjects: []client.Object{
-				&admissionregistrationv1.ValidatingWebhookConfiguration{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-validating-webhook"},
-					Webhooks: []admissionregistrationv1.ValidatingWebhook{
-						{
-							Name:         "test.webhook.io",
-							ClientConfig: admissionregistrationv1.WebhookClientConfig{URL: ptr.To("https://etcd-client:2379")},
-						},
-					},
-				},
-			},
-			expectWebhookGone: "test-validating-webhook",
-		},
-		{
-			name: "When validating webhook targets an allowed CP service it should preserve the webhook",
-			cpServices: []corev1.Service{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "allowed-service",
-						Namespace: hcpNamespace,
-						Labels:    map[string]string{hyperv1.AllowGuestWebhooksServiceLabel: "true"},
-					},
-				},
-			},
-			guestObjects: []client.Object{
-				&admissionregistrationv1.ValidatingWebhookConfiguration{
-					ObjectMeta: metav1.ObjectMeta{Name: "preserved-validating-webhook"},
-					Webhooks: []admissionregistrationv1.ValidatingWebhook{
-						{
-							Name:         "preserved.webhook.io",
-							ClientConfig: admissionregistrationv1.WebhookClientConfig{URL: ptr.To("https://allowed-service:8443")},
-						},
-					},
-				},
-			},
-			expectWebhookAlive: "preserved-validating-webhook",
-		},
-		{
-			name: "When mutating webhook targets a CP service it should delete the webhook",
-			cpServices: []corev1.Service{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "kube-apiserver",
-						Namespace: hcpNamespace,
-					},
-				},
-			},
-			guestObjects: []client.Object{
-				&admissionregistrationv1.MutatingWebhookConfiguration{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-mutating-webhook"},
-					Webhooks: []admissionregistrationv1.MutatingWebhook{
-						{
-							Name:         "mutating.webhook.io",
-							ClientConfig: admissionregistrationv1.WebhookClientConfig{URL: ptr.To("https://kube-apiserver:6443")},
-						},
-					},
-				},
-			},
-			expectWebhookGone: "test-mutating-webhook",
-		},
-		{
-			name: "When webhook targets an external URL it should preserve the webhook",
-			cpServices: []corev1.Service{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "etcd-client",
-						Namespace: hcpNamespace,
-					},
-				},
-			},
-			guestObjects: []client.Object{
-				&admissionregistrationv1.ValidatingWebhookConfiguration{
-					ObjectMeta: metav1.ObjectMeta{Name: "external-validating-webhook"},
-					Webhooks: []admissionregistrationv1.ValidatingWebhook{
-						{
-							Name:         "external.webhook.io",
-							ClientConfig: admissionregistrationv1.WebhookClientConfig{URL: ptr.To("https://external.example.com")},
-						},
-					},
-				},
-			},
-			expectWebhookAlive: "external-validating-webhook",
-		},
-		{
-			name: "When webhook uses Service reference instead of URL it should preserve the webhook",
-			cpServices: []corev1.Service{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "etcd-client",
-						Namespace: hcpNamespace,
-					},
-				},
-			},
-			guestObjects: []client.Object{
-				&admissionregistrationv1.ValidatingWebhookConfiguration{
-					ObjectMeta: metav1.ObjectMeta{Name: "service-ref-webhook"},
-					Webhooks: []admissionregistrationv1.ValidatingWebhook{
-						{
-							Name: "service.webhook.io",
-							ClientConfig: admissionregistrationv1.WebhookClientConfig{
-								Service: &admissionregistrationv1.ServiceReference{
-									Name:      "my-webhook-service",
-									Namespace: "default",
-								},
-							},
-						},
-					},
-				},
-			},
-			expectWebhookAlive: "service-ref-webhook",
-		},
-		{
-			name: "When validating webhook has mixed allowed and disallowed URLs it should delete the entire configuration",
-			cpServices: []corev1.Service{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "etcd-client",
-						Namespace: hcpNamespace,
-					},
-				},
-			},
-			guestObjects: []client.Object{
-				&admissionregistrationv1.ValidatingWebhookConfiguration{
-					ObjectMeta: metav1.ObjectMeta{Name: "mixed-validating-webhook"},
-					Webhooks: []admissionregistrationv1.ValidatingWebhook{
-						{
-							Name:         "allowed.webhook.io",
-							ClientConfig: admissionregistrationv1.WebhookClientConfig{URL: ptr.To("https://external.example.com")},
-						},
-						{
-							Name:         "disallowed.webhook.io",
-							ClientConfig: admissionregistrationv1.WebhookClientConfig{URL: ptr.To("https://etcd-client:2379")},
-						},
-					},
-				},
-			},
-			expectWebhookGone: "mixed-validating-webhook",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
-			ctx := t.Context()
-
-			cpObjects := make([]client.Object, 0, len(tt.cpServices))
-			for i := range tt.cpServices {
-				cpObjects = append(cpObjects, &tt.cpServices[i])
-			}
-
-			cpClient := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(cpObjects...).Build()
-			guestClient := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(tt.guestObjects...).Build()
-
-			r := &reconciler{
-				client:                 guestClient,
-				uncachedClient:         fake.NewClientBuilder().WithScheme(api.Scheme).Build(),
-				cpClient:               cpClient,
-				hcpNamespace:           hcpNamespace,
-				CreateOrUpdateProvider: &simpleCreateOrUpdater{},
-			}
-
-			err := r.ensureGuestAdmissionWebhooksAreValid(ctx)
-			g.Expect(err).ToNot(HaveOccurred())
-
-			if tt.expectWebhookGone != "" {
-				for _, obj := range tt.guestObjects {
-					key := client.ObjectKey{Name: tt.expectWebhookGone}
-					switch obj.(type) {
-					case *admissionregistrationv1.ValidatingWebhookConfiguration:
-						err := guestClient.Get(ctx, key, &admissionregistrationv1.ValidatingWebhookConfiguration{})
-						g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
-							"ValidatingWebhookConfiguration %q should have been deleted", tt.expectWebhookGone)
-					case *admissionregistrationv1.MutatingWebhookConfiguration:
-						err := guestClient.Get(ctx, key, &admissionregistrationv1.MutatingWebhookConfiguration{})
-						g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
-							"MutatingWebhookConfiguration %q should have been deleted", tt.expectWebhookGone)
-					default:
-						t.Fatalf("unexpected object type %T in guestObjects for expectWebhookGone check", obj)
-					}
-				}
-			}
-
-			if tt.expectWebhookAlive != "" {
-				for _, obj := range tt.guestObjects {
-					key := client.ObjectKey{Name: tt.expectWebhookAlive}
-					switch obj.(type) {
-					case *admissionregistrationv1.ValidatingWebhookConfiguration:
-						g.Expect(guestClient.Get(ctx, key, &admissionregistrationv1.ValidatingWebhookConfiguration{})).To(Succeed(),
-							"ValidatingWebhookConfiguration %q should still exist", tt.expectWebhookAlive)
-					case *admissionregistrationv1.MutatingWebhookConfiguration:
-						g.Expect(guestClient.Get(ctx, key, &admissionregistrationv1.MutatingWebhookConfiguration{})).To(Succeed(),
-							"MutatingWebhookConfiguration %q should still exist", tt.expectWebhookAlive)
-					default:
-						t.Fatalf("unexpected object type %T in guestObjects for expectWebhookAlive check", obj)
-					}
-				}
 			}
 		})
 	}

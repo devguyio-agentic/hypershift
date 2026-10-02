@@ -17,10 +17,14 @@ import (
 	karpenterutil "github.com/openshift/hypershift/support/karpenter"
 	"github.com/openshift/hypershift/support/upsert"
 
+	configv1 "github.com/openshift/api/config/v1"
+
 	awskarpenterv1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,6 +36,24 @@ import (
 )
 
 const testInfraID = "test-infra"
+
+func TestReconcileCRDsStandaloneAdapterOnlyInstallsHyperShiftCRD(t *testing.T) {
+	g := NewWithT(t)
+	guestClient := fake.NewClientBuilder().WithScheme(hyperapi.Scheme).Build()
+	r := &EC2NodeClassReconciler{
+		guestClient:            guestClient,
+		CreateOrUpdateProvider: upsert.New(false),
+		SkipUpstreamCRD:        true,
+	}
+
+	err := r.reconcileCRDs(t.Context(), true)
+	g.Expect(err).NotTo(HaveOccurred())
+
+	crdList := &apiextensionsv1.CustomResourceDefinitionList{}
+	g.Expect(guestClient.List(t.Context(), crdList)).To(Succeed())
+	g.Expect(crdList.Items).To(HaveLen(1))
+	g.Expect(crdList.Items[0].Name).To(Equal(crdOpenshiftEC2NodeClass.Name))
+}
 
 func TestReconcileEC2NodeClass(t *testing.T) {
 	userDataSecret := &corev1.Secret{
@@ -93,7 +115,7 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 			},
 		},
 		{
-			name: "when OpenshiftEC2NodeClassSpec.spec is defined, all fields should be mirrored",
+			name: "When OpenshiftEC2NodeClassSpec.spec is defined, it should mirror all fields",
 			spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
 				SubnetSelectorTerms: []hyperkarpenterv1.SubnetSelectorTerm{
 					{
@@ -407,11 +429,11 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 			},
 		},
 		{
-			name: "when platform tags exist in HostedControlPlane, they should be merged with nodeclass tags with platform tags taking precedence",
+			name: "When platform tags exist in HostedControlPlane it should merge with platform tags taking precedence",
 			spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
 				Tags: map[string]string{
 					"nodeclass-tag":   "nodeclass-value",
-					"conflicting-tag": "nodeclass-value", // This should be overridden by platform tag
+					"conflicting-tag": "nodeclass-value", // Platform tag wins by default
 				},
 			},
 			hcp: &hyperv1.HostedControlPlane{
@@ -420,7 +442,7 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 					Platform: hyperv1.PlatformSpec{
 						Type: hyperv1.AWSPlatform,
 						AWS: &hyperv1.AWSPlatformSpec{
-							ResourceTags: []hyperv1.AWSResourceTag{
+							ResourceTags: []hyperv1.AWSClusterResourceTag{
 								{Key: "red-hat-managed", Value: "true"},
 								{Key: "red-hat-clustertype", Value: "rosa"},
 								{Key: "conflicting-tag", Value: "platform-value"},
@@ -447,7 +469,7 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 				},
 				Tags: map[string]string{
 					"nodeclass-tag":       "nodeclass-value",
-					"conflicting-tag":     "platform-value", // Platform tag wins
+					"conflicting-tag":     "platform-value", // Platform tag wins by default
 					"red-hat-managed":     "true",
 					"red-hat-clustertype": "rosa",
 				},
@@ -464,10 +486,10 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 			},
 		},
 		{
-			name: "when nodeclass has conflicting red-hat-clustertype tag, platform tag should take precedence",
+			name: "When platform tag has overridePolicy Deny it should take precedence over nodeclass tag",
 			spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
 				Tags: map[string]string{
-					"red-hat-clustertype": "some-other-value", // This should be overridden by platform tag
+					"red-hat-clustertype": "some-other-value", // This should be blocked by Deny
 					"nodeclass-only-tag":  "nodeclass-value",
 				},
 			},
@@ -477,8 +499,8 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 					Platform: hyperv1.PlatformSpec{
 						Type: hyperv1.AWSPlatform,
 						AWS: &hyperv1.AWSPlatformSpec{
-							ResourceTags: []hyperv1.AWSResourceTag{
-								{Key: "red-hat-clustertype", Value: "rosa"}, // This should override nodeclass tag
+							ResourceTags: []hyperv1.AWSClusterResourceTag{
+								{Key: "red-hat-clustertype", Value: "rosa", OverridePolicy: hyperv1.AWSResourceTagOverridePolicyDeny},
 								{Key: "red-hat-managed", Value: "true"},
 							},
 						},
@@ -502,9 +524,64 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 					},
 				},
 				Tags: map[string]string{
-					"red-hat-clustertype": "rosa",            // Platform tag won over nodeclass tag
+					"red-hat-clustertype": "rosa",            // Platform tag wins because of Deny
 					"red-hat-managed":     "true",            // Platform tag added
-					"nodeclass-only-tag":  "nodeclass-value", // Nodeclass tag preserved
+					"nodeclass-only-tag":  "nodeclass-value", // Nodeclass tag preserved (no conflict)
+				},
+				BlockDeviceMappings: []*awskarpenterv1.BlockDeviceMapping{
+					{
+						DeviceName: ptr.To("/dev/xvda"),
+						EBS: &awskarpenterv1.BlockDevice{
+							VolumeSize: ptr.To(resource.MustParse("120Gi")),
+							VolumeType: ptr.To("gp3"),
+							Encrypted:  ptr.To(true),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "When platform tag has overridePolicy Allow it should let nodeclass tag take precedence",
+			spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
+				Tags: map[string]string{
+					"red-hat-clustertype": "some-other-value", // Nodeclass wins because Allow
+					"nodeclass-only-tag":  "nodeclass-value",
+				},
+			},
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					InfraID: "test-infra",
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AWSPlatform,
+						AWS: &hyperv1.AWSPlatformSpec{
+							ResourceTags: []hyperv1.AWSClusterResourceTag{
+								{Key: "red-hat-clustertype", Value: "rosa", OverridePolicy: hyperv1.AWSResourceTagOverridePolicyAllow},
+								{Key: "red-hat-managed", Value: "true"},
+							},
+						},
+					},
+				},
+			},
+			expectedSpec: awskarpenterv1.EC2NodeClassSpec{
+				SubnetSelectorTerms: []awskarpenterv1.SubnetSelectorTerm{
+					{
+						Tags: map[string]string{
+							"kubernetes.io/role/internal-elb":                    "1",
+							fmt.Sprintf("kubernetes.io/cluster/%s", testInfraID): "*",
+						},
+					},
+				},
+				SecurityGroupSelectorTerms: []awskarpenterv1.SecurityGroupSelectorTerm{
+					{
+						Tags: map[string]string{
+							"karpenter.sh/discovery": "test-infra",
+						},
+					},
+				},
+				Tags: map[string]string{
+					"red-hat-clustertype": "some-other-value", // Nodeclass tag wins because Allow
+					"red-hat-managed":     "true",             // Platform tag added
+					"nodeclass-only-tag":  "nodeclass-value",  // Nodeclass tag preserved
 				},
 				BlockDeviceMappings: []*awskarpenterv1.BlockDeviceMapping{
 					{
@@ -629,6 +706,210 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 	}
 }
 
+func TestIsControlPlaneUpgrading(t *testing.T) {
+	testCases := []struct {
+		name     string
+		hcp      *hyperv1.HostedControlPlane
+		expected bool
+	}{
+		{
+			name: "When desired image is empty, it should return false",
+			hcp: &hyperv1.HostedControlPlane{
+				Status: hyperv1.HostedControlPlaneStatus{
+					ControlPlaneVersion: hyperv1.ControlPlaneVersionStatus{},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "When no history entries exist (initial install), it should return false",
+			hcp: &hyperv1.HostedControlPlane{
+				Status: hyperv1.HostedControlPlaneStatus{
+					ControlPlaneVersion: hyperv1.ControlPlaneVersionStatus{
+						Desired: configv1.Release{Image: "quay.io/release:4.17.0"},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "When desired matches completed, it should return false",
+			hcp: &hyperv1.HostedControlPlane{
+				Status: hyperv1.HostedControlPlaneStatus{
+					ControlPlaneVersion: hyperv1.ControlPlaneVersionStatus{
+						Desired: configv1.Release{Image: "quay.io/release:4.17.0"},
+						History: []hyperv1.ControlPlaneUpdateHistory{
+							{State: configv1.CompletedUpdate, Image: "quay.io/release:4.17.0"},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "When desired differs from completed (upgrade in progress), it should return true",
+			hcp: &hyperv1.HostedControlPlane{
+				Status: hyperv1.HostedControlPlaneStatus{
+					ControlPlaneVersion: hyperv1.ControlPlaneVersionStatus{
+						Desired: configv1.Release{Image: "quay.io/release:4.18.0"},
+						History: []hyperv1.ControlPlaneUpdateHistory{
+							{State: configv1.PartialUpdate, Image: "quay.io/release:4.18.0"},
+							{State: configv1.CompletedUpdate, Image: "quay.io/release:4.17.0"},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "When only partial entries exist (initial install still running), it should return false",
+			hcp: &hyperv1.HostedControlPlane{
+				Status: hyperv1.HostedControlPlaneStatus{
+					ControlPlaneVersion: hyperv1.ControlPlaneVersionStatus{
+						Desired: configv1.Release{Image: "quay.io/release:4.17.0"},
+						History: []hyperv1.ControlPlaneUpdateHistory{
+							{State: configv1.PartialUpdate, Image: "quay.io/release:4.17.0"},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			g.Expect(isControlPlaneUpgrading(tc.hcp)).To(Equal(tc.expected))
+		})
+	}
+}
+
+func TestReconcileEC2NodeClassUpgradePause(t *testing.T) {
+	oldUserData := ptr.To("old-userdata-hash-abc")
+	oldAMI := []awskarpenterv1.AMISelectorTerm{{ID: "ami-old"}}
+	newUserData := "new-userdata-hash-xyz"
+	newAMI := "ami-new"
+
+	userDataSecret := &corev1.Secret{
+		Data: map[string][]byte{
+			"value": []byte(newUserData),
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				hyperkarpenterv1.UserDataAMILabel: newAMI,
+			},
+		},
+	}
+
+	upgradingHCP := &hyperv1.HostedControlPlane{
+		Spec: hyperv1.HostedControlPlaneSpec{
+			InfraID: testInfraID,
+			Platform: hyperv1.PlatformSpec{
+				Type: hyperv1.AWSPlatform,
+			},
+		},
+		Status: hyperv1.HostedControlPlaneStatus{
+			ControlPlaneVersion: hyperv1.ControlPlaneVersionStatus{
+				Desired: configv1.Release{Image: "quay.io/release:4.18.0"},
+				History: []hyperv1.ControlPlaneUpdateHistory{
+					{State: configv1.PartialUpdate, Image: "quay.io/release:4.18.0"},
+					{State: configv1.CompletedUpdate, Image: "quay.io/release:4.17.0"},
+				},
+			},
+		},
+	}
+
+	stableHCP := &hyperv1.HostedControlPlane{
+		Spec: hyperv1.HostedControlPlaneSpec{
+			InfraID: testInfraID,
+			Platform: hyperv1.PlatformSpec{
+				Type: hyperv1.AWSPlatform,
+			},
+		},
+		Status: hyperv1.HostedControlPlaneStatus{
+			ControlPlaneVersion: hyperv1.ControlPlaneVersionStatus{
+				Desired: configv1.Release{Image: "quay.io/release:4.17.0"},
+				History: []hyperv1.ControlPlaneUpdateHistory{
+					{State: configv1.CompletedUpdate, Image: "quay.io/release:4.17.0"},
+				},
+			},
+		},
+	}
+
+	testCases := []struct {
+		name                  string
+		hcp                   *hyperv1.HostedControlPlane
+		ec2NodeClass          *awskarpenterv1.EC2NodeClass
+		openshiftEC2NodeClass *hyperkarpenterv1.OpenshiftEC2NodeClass
+		expectedUserData      *string
+		expectedAMIs          []awskarpenterv1.AMISelectorTerm
+	}{
+		{
+			name: "When CP is upgrading and NodeClass is unpinned with existing values, preserve old userData and AMIs",
+			hcp:  upgradingHCP,
+			ec2NodeClass: &awskarpenterv1.EC2NodeClass{
+				Spec: awskarpenterv1.EC2NodeClassSpec{
+					UserData:         oldUserData,
+					AMISelectorTerms: oldAMI,
+				},
+			},
+			openshiftEC2NodeClass: &hyperkarpenterv1.OpenshiftEC2NodeClass{},
+			expectedUserData:      oldUserData,
+			expectedAMIs:          oldAMI,
+		},
+		{
+			name: "When CP is upgrading but NodeClass is pinned, apply new values",
+			hcp:  upgradingHCP,
+			ec2NodeClass: &awskarpenterv1.EC2NodeClass{
+				Spec: awskarpenterv1.EC2NodeClassSpec{
+					UserData:         oldUserData,
+					AMISelectorTerms: oldAMI,
+				},
+			},
+			openshiftEC2NodeClass: &hyperkarpenterv1.OpenshiftEC2NodeClass{
+				Spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
+					Version: "4.18.0",
+				},
+			},
+			expectedUserData: ptr.To(newUserData),
+			expectedAMIs:     []awskarpenterv1.AMISelectorTerm{{ID: newAMI}},
+		},
+		{
+			name:                  "When CP is upgrading and NodeClass is unpinned but has no existing values (first creation), it should still apply new values",
+			hcp:                   upgradingHCP,
+			ec2NodeClass:          &awskarpenterv1.EC2NodeClass{},
+			openshiftEC2NodeClass: &hyperkarpenterv1.OpenshiftEC2NodeClass{},
+			expectedUserData:      ptr.To(newUserData),
+			expectedAMIs:          []awskarpenterv1.AMISelectorTerm{{ID: newAMI}},
+		},
+		{
+			name: "When CP is stable, apply new values regardless",
+			hcp:  stableHCP,
+			ec2NodeClass: &awskarpenterv1.EC2NodeClass{
+				Spec: awskarpenterv1.EC2NodeClassSpec{
+					UserData:         oldUserData,
+					AMISelectorTerms: oldAMI,
+				},
+			},
+			openshiftEC2NodeClass: &hyperkarpenterv1.OpenshiftEC2NodeClass{},
+			expectedUserData:      ptr.To(newUserData),
+			expectedAMIs:          []awskarpenterv1.AMISelectorTerm{{ID: newAMI}},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			err := reconcileEC2NodeClass(context.Background(), tc.ec2NodeClass, tc.openshiftEC2NodeClass, tc.hcp, userDataSecret)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(tc.ec2NodeClass.Spec.UserData).To(Equal(tc.expectedUserData))
+			g.Expect(tc.ec2NodeClass.Spec.AMISelectorTerms).To(Equal(tc.expectedAMIs))
+		})
+	}
+}
+
 func TestReconcileStatus(t *testing.T) {
 	testCases := []struct {
 		name                         string
@@ -713,7 +994,8 @@ func TestReconcileStatus(t *testing.T) {
 				Status: tc.ec2NodeClassStatus,
 			}
 
-			err := r.reconcileStatus(context.Background(), ec2NodeClass, openshiftNodeClass)
+			hcp := &hyperv1.HostedControlPlane{Spec: hyperv1.HostedControlPlaneSpec{InfraID: "test-infra"}}
+			err := r.reconcileStatus(context.Background(), ec2NodeClass, openshiftNodeClass, hcp)
 			g.Expect(err).ToNot(HaveOccurred())
 
 			// Re-fetch to verify what was persisted via status patch
@@ -769,13 +1051,15 @@ func TestReconcileStatusIdempotency(t *testing.T) {
 		},
 	}
 
+	hcp := &hyperv1.HostedControlPlane{Spec: hyperv1.HostedControlPlaneSpec{InfraID: "test-infra"}}
+
 	// When reconcileStatus is called twice with the same upstream status it should not accumulate entries
-	g.Expect(r.reconcileStatus(context.Background(), ec2NodeClass, openshiftNodeClass)).To(Succeed())
+	g.Expect(r.reconcileStatus(context.Background(), ec2NodeClass, openshiftNodeClass, hcp)).To(Succeed())
 
 	updated := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
 	g.Expect(fakeClient.Get(context.Background(), client.ObjectKeyFromObject(openshiftNodeClass), updated)).To(Succeed())
 
-	g.Expect(r.reconcileStatus(context.Background(), ec2NodeClass, updated)).To(Succeed())
+	g.Expect(r.reconcileStatus(context.Background(), ec2NodeClass, updated, hcp)).To(Succeed())
 
 	final := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
 	g.Expect(fakeClient.Get(context.Background(), client.ObjectKeyFromObject(openshiftNodeClass), final)).To(Succeed())
@@ -784,6 +1068,197 @@ func TestReconcileStatusIdempotency(t *testing.T) {
 	g.Expect(final.Status.CapacityReservations).To(HaveLen(1))
 	g.Expect(final.Status.Subnets).To(HaveLen(1))
 	g.Expect(final.Status.SecurityGroups).To(HaveLen(1))
+}
+
+func TestReconcileStatusTagConflictCondition(t *testing.T) {
+	testCases := []struct {
+		name             string
+		tags             map[string]string
+		hcp              *hyperv1.HostedControlPlane
+		expectCondition  bool
+		expectedStatus   metav1.ConditionStatus
+		expectedReason   string
+		expectedContains string
+	}{
+		{
+			name: "When platform AWS is nil it should remove the condition",
+			tags: map[string]string{"key": "value"},
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{InfraID: "test-infra"},
+			},
+			expectCondition: false,
+		},
+		{
+			name: "When platform ResourceTags is empty it should remove the condition",
+			tags: map[string]string{"key": "value"},
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					InfraID: "test-infra",
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AWSPlatform,
+						AWS:  &hyperv1.AWSPlatformSpec{ResourceTags: []hyperv1.AWSClusterResourceTag{}},
+					},
+				},
+			},
+			expectCondition: false,
+		},
+		{
+			name: "When nodeclass tags is nil it should remove the condition",
+			tags: nil,
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					InfraID: "test-infra",
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AWSPlatform,
+						AWS: &hyperv1.AWSPlatformSpec{
+							ResourceTags: []hyperv1.AWSClusterResourceTag{{Key: "k", Value: "v"}},
+						},
+					},
+				},
+			},
+			expectCondition: false,
+		},
+		{
+			name: "When tags have equal values it should report no conflicts",
+			tags: map[string]string{"env": "prod"},
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					InfraID: "test-infra",
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AWSPlatform,
+						AWS: &hyperv1.AWSPlatformSpec{
+							ResourceTags: []hyperv1.AWSClusterResourceTag{{Key: "env", Value: "prod"}},
+						},
+					},
+				},
+			},
+			expectCondition:  true,
+			expectedStatus:   metav1.ConditionFalse,
+			expectedReason:   hyperv1.AWSResourceTagNoConflictReason,
+			expectedContains: "No AWS resource tag conflicts",
+		},
+		{
+			name: "When nodeclass conflicts with unset overridePolicy it should report conflict detected",
+			tags: map[string]string{"env": "staging"},
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					InfraID: "test-infra",
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AWSPlatform,
+						AWS: &hyperv1.AWSPlatformSpec{
+							ResourceTags: []hyperv1.AWSClusterResourceTag{{Key: "env", Value: "prod"}},
+						},
+					},
+				},
+			},
+			expectCondition:  true,
+			expectedStatus:   metav1.ConditionTrue,
+			expectedReason:   hyperv1.AWSResourceTagConflictDetectedReason,
+			expectedContains: "1 AWS resource tag conflict(s) detected",
+		},
+		{
+			name: "When platform tag has Allow it should report overrides applied",
+			tags: map[string]string{"env": "staging"},
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					InfraID: "test-infra",
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AWSPlatform,
+						AWS: &hyperv1.AWSPlatformSpec{
+							ResourceTags: []hyperv1.AWSClusterResourceTag{
+								{Key: "env", Value: "prod", OverridePolicy: hyperv1.AWSResourceTagOverridePolicyAllow},
+							},
+						},
+					},
+				},
+			},
+			expectCondition:  true,
+			expectedStatus:   metav1.ConditionFalse,
+			expectedReason:   hyperv1.AWSResourceTagNoConflictReason,
+			expectedContains: "1 AWS resource tag override(s) applied",
+		},
+		{
+			name: "When platform tag has Deny it should report conflict detected",
+			tags: map[string]string{"env": "staging"},
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					InfraID: "test-infra",
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AWSPlatform,
+						AWS: &hyperv1.AWSPlatformSpec{
+							ResourceTags: []hyperv1.AWSClusterResourceTag{
+								{Key: "env", Value: "prod", OverridePolicy: hyperv1.AWSResourceTagOverridePolicyDeny},
+							},
+						},
+					},
+				},
+			},
+			expectCondition:  true,
+			expectedStatus:   metav1.ConditionTrue,
+			expectedReason:   hyperv1.AWSResourceTagConflictDetectedReason,
+			expectedContains: "1 AWS resource tag conflict(s) detected",
+		},
+		{
+			name: "When both blocked and allowed overrides exist it should report both in message",
+			tags: map[string]string{"env": "staging", "team": "other"},
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					InfraID: "test-infra",
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AWSPlatform,
+						AWS: &hyperv1.AWSPlatformSpec{
+							ResourceTags: []hyperv1.AWSClusterResourceTag{
+								{Key: "env", Value: "prod", OverridePolicy: hyperv1.AWSResourceTagOverridePolicyDeny},
+								{Key: "team", Value: "platform", OverridePolicy: hyperv1.AWSResourceTagOverridePolicyAllow},
+							},
+						},
+					},
+				},
+			},
+			expectCondition:  true,
+			expectedStatus:   metav1.ConditionTrue,
+			expectedReason:   hyperv1.AWSResourceTagConflictDetectedReason,
+			expectedContains: "1 override(s) applied",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			scheme := runtime.NewScheme()
+			g.Expect(hyperkarpenterv1.AddToScheme(scheme)).To(Succeed())
+
+			openshiftNodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-nodeclass"},
+				Spec:       hyperkarpenterv1.OpenshiftEC2NodeClassSpec{Tags: tc.tags},
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(openshiftNodeClass).
+				WithStatusSubresource(openshiftNodeClass).
+				Build()
+
+			r := &EC2NodeClassReconciler{guestClient: fakeClient}
+			ec2NodeClass := &awskarpenterv1.EC2NodeClass{}
+
+			g.Expect(r.reconcileStatus(context.Background(), ec2NodeClass, openshiftNodeClass, tc.hcp)).To(Succeed())
+
+			updated := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
+			g.Expect(fakeClient.Get(context.Background(), client.ObjectKeyFromObject(openshiftNodeClass), updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, hyperv1.NodePoolAWSResourceTagConflictConditionType)
+			if !tc.expectCondition {
+				g.Expect(cond).To(BeNil())
+				return
+			}
+			g.Expect(cond).ToNot(BeNil())
+			g.Expect(cond.Status).To(Equal(tc.expectedStatus))
+			g.Expect(cond.Reason).To(Equal(tc.expectedReason))
+			g.Expect(cond.Message).To(ContainSubstring(tc.expectedContains))
+		})
+	}
 }
 
 func TestGetUserDataSecret(t *testing.T) {
