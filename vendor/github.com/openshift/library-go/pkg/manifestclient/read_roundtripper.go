@@ -12,18 +12,10 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/apiserver/pkg/features"
 	"k8s.io/apiserver/pkg/server"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 )
-
-func init() {
-	// This feature gate is needed to set requestInfo.LabelSelector
-	utilruntime.Must(utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=true", features.AuthorizeWithSelectors)))
-}
 
 type manifestRoundTripper struct {
 	sourceFS fs.FS
@@ -91,6 +83,13 @@ func (mrt *manifestRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 			}
 			timeoutDuration = time.Duration(currSeconds) * time.Second
 		}
+
+		// WatchList is unnecessary for the manifest client since we read from disk and performance isn't a concern.
+		// Returning an error forces the client to fall back to the standard List.
+		if req.URL.Query().Get("sendInitialEvents") == "true" {
+			return nil, fmt.Errorf("manifest client does not support WatchList feature")
+		}
+
 		resp := &http.Response{}
 		resp.StatusCode = http.StatusOK
 		resp.Status = http.StatusText(resp.StatusCode)

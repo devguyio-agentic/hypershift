@@ -388,6 +388,9 @@ const (
 	RecommendedClusterSizeAnnotation = "hypershift.openshift.io/recommended-cluster-size"
 
 	// KubeAPIServerVerbosityLevelAnnotation allows specifying the log verbosity of kube-apiserver.
+	// Deprecated: Use spec.operatorConfiguration.kubeAPIServer.logLevel instead.
+	// When both are set, the OperatorConfiguration field takes precedence.
+	// This annotation will be removed in a future release.
 	KubeAPIServerVerbosityLevelAnnotation = "hypershift.openshift.io/kube-apiserver-verbosity-level"
 
 	// NodePoolSupportsKubevirtTopologySpreadConstraintsAnnotation indicates if the NodePool currently supports
@@ -535,12 +538,15 @@ type Capabilities struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.operatorConfiguration) || !has(self.operatorConfiguration.clusterNetworkOperator) || !has(self.operatorConfiguration.clusterNetworkOperator.disableMultiNetwork) || !self.operatorConfiguration.clusterNetworkOperator.disableMultiNetwork || self.networking.networkType == 'Other'",message="disableMultiNetwork can only be set to true when networkType is 'Other'"
 // +kubebuilder:validation:XValidation:rule="self.networking.networkType == 'OVNKubernetes' || !has(self.operatorConfiguration) || !has(self.operatorConfiguration.clusterNetworkOperator) || !has(self.operatorConfiguration.clusterNetworkOperator.ovnKubernetesConfig)", message="ovnKubernetesConfig is forbidden when networkType is not OVNKubernetes"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.secretEncryption) || has(self.secretEncryption)",message="secretEncryption cannot be removed once configured"
+// +kubebuilder:validation:XValidation:rule="self.?operatorConfiguration.?csiDriverOperator.?aws.?initialKMSKeyARN.hasValue() == oldSelf.?operatorConfiguration.?csiDriverOperator.?aws.?initialKMSKeyARN.hasValue()",message="initialKMSKeyARN can only be set when the HostedCluster is created and cannot be added or removed afterwards"
+// +kubebuilder:validation:XValidation:rule="!self.?operatorConfiguration.?csiDriverOperator.?aws.hasValue() || self.platform.type == 'AWS'",message="csiDriverOperator.aws can only be set when platform.type is AWS"
+// +kubebuilder:validation:XValidation:rule="!self.?operatorConfiguration.?csiDriverOperator.?aws.?initialKMSKeyARN.hasValue() || !has(self.platform.aws) || self.operatorConfiguration.csiDriverOperator.aws.initialKMSKeyARN.split(':')[3] == self.platform.aws.region",message="initialKMSKeyARN must be in the same region as the cluster (platform.aws.region)"
 type HostedClusterSpec struct {
 	// release specifies the desired OCP release payload for all the hosted cluster components.
 	// This includes those components running management side like the Kube API Server and the CVO but also the operands which land in the hosted cluster data plane like the ingress controller, ovn agents, etc.
 	// The maximum and minimum supported release versions are determined by the running Hypersfhit Operator.
 	// Attempting to use an unsupported version will result in the HostedCluster being degraded and the validateReleaseImage condition being false.
-	// Attempting to use a release with a skew against a NodePool release bigger than N-2 for the y-stream will result in leaving the NodePool in an unsupported state.
+	// Attempting to use a release with a skew against a NodePool release bigger than N-3 for the y-stream will result in leaving the NodePool in an unsupported state.
 	// Changing this field will trigger a rollout of the control plane components.
 	// The behavior of the rollout will be driven by the ControllerAvailabilityPolicy and InfrastructureAvailabilityPolicy for PDBs and maxUnavailable and surce policies.
 	// +required
@@ -709,6 +715,7 @@ type HostedClusterSpec struct {
 	// validation.
 	// If the platform is AWS and this value is set, the controller will update an s3 object with the appropriate OIDC documents (using the serviceAccountSigningKey info) into that issuerURL.
 	// The expectation is for this s3 url to be backed by an OIDC provider in the AWS IAM.
+	// Once set, this value is immutable.
 	// +kubebuilder:default:="https://kubernetes.default.svc"
 	// +immutable
 	// +optional
@@ -1235,7 +1242,7 @@ type ClusterNetworking struct {
 	// networkType specifies the SDN provider used for cluster networking.
 	// Defaults to OVNKubernetes.
 	// This field is required and immutable.
-	// kubebuilder:validation:XValidation:rule="self == oldSelf", message="networkType is immutable"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="networkType is immutable"
 	// +optional
 	// +kubebuilder:default:="OVNKubernetes"
 	// +immutable
@@ -1513,20 +1520,29 @@ type ProvisionerConfig struct {
 // including the target platform and platform-specific settings.
 //
 // +kubebuilder:validation:XValidation:rule="self.platform == 'AWS' ? has(self.aws) : !has(self.aws)",message="aws is required when platform is AWS, and forbidden otherwise"
+// +kubebuilder:validation:XValidation:rule="self.platform == 'Azure' ? has(self.azure) : !has(self.azure)",message="azure is required when platform is Azure, and forbidden otherwise"
 // +union
 type KarpenterConfig struct {
 	// platform specifies the infrastructure platform that Karpenter should provision nodes on.
 	//
 	// +required
 	// +unionDiscriminator
-	// +kubebuilder:validation:Enum=AWS
+	// +kubebuilder:validation:Enum=AWS;Azure
 	Platform PlatformType `json:"platform,omitempty"`
 
 	// aws specifies the AWS-specific configuration for Karpenter.
+	// Required when platform is "AWS", and forbidden otherwise.
 	//
 	// +optional
 	// +unionMember
 	AWS KarpenterAWSConfig `json:"aws,omitzero"`
+
+	// azure specifies the Azure-specific configuration for Karpenter.
+	// Required when platform is "Azure", and forbidden otherwise.
+	//
+	// +optional
+	// +unionMember
+	Azure KarpenterAzureConfig `json:"azure,omitzero"`
 }
 
 // KarpenterAWSConfig specifies AWS-specific configuration for the Karpenter provisioner.
@@ -1772,6 +1788,23 @@ type KarpenterAWSConfig struct {
 	RoleARN string `json:"roleARN,omitempty"`
 }
 
+// KarpenterAzureConfig specifies Azure-specific configuration for the Karpenter provisioner.
+type KarpenterAzureConfig struct {
+	// clientID is the client ID of the user-assigned managed identity Karpenter uses
+	// to provision and manage Azure VMs in the hosted cluster's subscription.
+	//
+	// The identity must have a federated credential that trusts the hosted cluster
+	// OIDC issuer for subject system:serviceaccount:kube-system:karpenter.
+	//
+	// The identity must be granted Virtual Machine Contributor, Network Contributor,
+	// and Managed Identity Operator on the cluster resource group (and Network Contributor
+	// on the VNet resource group when it differs).
+	//
+	// The client ID must be a valid UUID. It should be 5 groups of hyphen separated hexadecimal characters in the form 8-4-4-4-12.
+	// +required
+	ClientID AzureClientID `json:"clientID,omitempty"`
+}
+
 const (
 	// ProvisionerKarpenter indicates that Karpenter is used for automatic node provisioning.
 	ProvisionerKarpenter Provisioner = "Karpenter"
@@ -1961,6 +1994,28 @@ type ClusterAutoscaling struct {
 	//
 	// +optional
 	Expanders []ExpanderString `json:"expanders,omitempty"`
+
+	// kubeClientQPS sets the "--kube-client-qps" flag on cluster-autoscaler.
+	// Controls the maximum queries-per-second the autoscaler may send to the
+	// kube-apiserver. Valid values are -1 through 1000.
+	// When set to -1, client-side rate limiting is disabled.
+	// When set to 0, the flag is passed but client-go applies its default QPS of 5.
+	// When omitted, the flag is not set and the autoscaler uses its default (5).
+	//
+	// +kubebuilder:validation:Minimum=-1
+	// +kubebuilder:validation:Maximum=1000
+	// +optional
+	KubeClientQPS *int32 `json:"kubeClientQPS,omitempty"`
+
+	// kubeClientBurst sets the "--kube-client-burst" flag on cluster-autoscaler.
+	// Controls the maximum burst of queries to the kube-apiserver.
+	// Valid values are 1 through 2000.
+	// When omitted, the flag is not set and the autoscaler uses its default (10).
+	//
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=2000
+	// +optional
+	KubeClientBurst int32 `json:"kubeClientBurst,omitempty"`
 }
 
 // EtcdManagementType is a enum specifying the strategy for managing the cluster's etcd instance
@@ -2815,6 +2870,8 @@ type ClusterConfiguration struct {
 
 	// authentication specifies cluster-wide settings for authentication (like OAuth and
 	// webhook token authenticators).
+	// Note: the serviceAccountIssuer field within this configuration is ignored; the
+	// HostedCluster's spec.issuerURL is always used as the service account issuer instead.
 	// +optional
 	Authentication *configv1.AuthenticationSpec `json:"authentication,omitempty"`
 
@@ -2892,6 +2949,88 @@ type OperatorConfiguration struct {
 	//
 	// +optional
 	IngressOperator *IngressOperatorSpec `json:"ingressOperator,omitempty"`
+
+	// kubeAPIServer configures the kube-apiserver component.
+	// Setting the logLevel field triggers a rolling restart of the component.
+	// When omitted, this means the user has no opinion and the platform
+	// chooses a reasonable default, which is subject to change over time.
+	// The current default log level is Normal.
+	// +optional
+	// +openshift:enable:FeatureGate=HCPUserFacingOperatorLogs
+	KubeAPIServer KubeAPIServerOperatorSpec `json:"kubeAPIServer,omitzero"`
+
+	// etcd configures the etcd component.
+	// Setting the logLevel field triggers a rolling restart of the component.
+	// Note: etcd supports fewer log levels than klog-based components,
+	// etcd supports only Normal and Debug log levels.
+	// When omitted, this means the user has no opinion and the platform
+	// chooses a reasonable default, which is subject to change over time.
+	// The current default log level is Normal.
+	// +optional
+	// +openshift:enable:FeatureGate=HCPUserFacingOperatorLogs
+	Etcd EtcdOperatorSpec `json:"etcd,omitzero"`
+
+	// kubeControllerManager configures the kube-controller-manager component.
+	// Setting the logLevel field triggers a rolling restart of the component.
+	// When omitted, this means the user has no opinion and the platform
+	// chooses a reasonable default, which is subject to change over time.
+	// The current default log level is Normal.
+	// +optional
+	// +openshift:enable:FeatureGate=HCPUserFacingOperatorLogs
+	KubeControllerManager KubeControllerManagerOperatorSpec `json:"kubeControllerManager,omitzero"`
+
+	// kubeScheduler configures the kube-scheduler component.
+	// Setting the logLevel field triggers a rolling restart of the component.
+	// When omitted, this means the user has no opinion and the platform
+	// chooses a reasonable default, which is subject to change over time.
+	// The current default log level is Normal.
+	// +optional
+	// +openshift:enable:FeatureGate=HCPUserFacingOperatorLogs
+	KubeScheduler KubeSchedulerOperatorSpec `json:"kubeScheduler,omitzero"`
+
+	// openShiftControllerManager configures the openshift-controller-manager component.
+	// Setting the logLevel field triggers a rolling restart of the component.
+	// When omitted, this means the user has no opinion and the platform
+	// chooses a reasonable default, which is subject to change over time.
+	// The current default log level is Normal.
+	// +optional
+	// +openshift:enable:FeatureGate=HCPUserFacingOperatorLogs
+	OpenShiftControllerManager OpenShiftControllerManagerOperatorSpec `json:"openShiftControllerManager,omitzero"`
+
+	// openShiftAPIServer configures the openshift-apiserver component.
+	// Setting the logLevel field triggers a rolling restart of the component.
+	// When omitted, this means the user has no opinion and the platform
+	// chooses a reasonable default, which is subject to change over time.
+	// The current default log level is Normal.
+	// +optional
+	// +openshift:enable:FeatureGate=HCPUserFacingOperatorLogs
+	OpenShiftAPIServer OpenShiftAPIServerOperatorSpec `json:"openShiftAPIServer,omitzero"`
+
+	// openShiftOAuthAPIServer configures the openshift-oauth-apiserver component.
+	// Setting the logLevel field triggers a rolling restart of the component.
+	// When omitted, this means the user has no opinion and the platform
+	// chooses a reasonable default, which is subject to change over time.
+	// The current default log level is Normal.
+	// +optional
+	// +openshift:enable:FeatureGate=HCPUserFacingOperatorLogs
+	OpenShiftOAuthAPIServer OpenShiftOAuthAPIServerOperatorSpec `json:"openShiftOAuthAPIServer,omitzero"`
+
+	// oauthServer configures the oauth-server component.
+	// Setting the logLevel field triggers a rolling restart of the component.
+	// When omitted, this means the user has no opinion and the platform
+	// chooses a reasonable default, which is subject to change over time.
+	// The current default log level is Normal.
+	// +optional
+	// +openshift:enable:FeatureGate=HCPUserFacingOperatorLogs
+	OAuthServer OAuthServerOperatorSpec `json:"oauthServer,omitzero"`
+
+	// csiDriverOperator configures the CSI drivers of the hosted cluster.
+	// Settings are grouped by platform.
+	//
+	// When omitted, the CSI drivers use their default configuration.
+	//
+	// +optional
+	CSIDriverOperator CSIDriverOperatorSpec `json:"csiDriverOperator,omitzero"`
 }
 
 // +genclient
@@ -2915,6 +3054,8 @@ type OperatorConfiguration struct {
 // +kubebuilder:printcolumn:name="Message",type="string",JSONPath=".status.conditions[?(@.type==\"Available\")].message",description="Message"
 // +kubebuilder:printcolumn:name="CP Progress",type="string",JSONPath=".status.controlPlaneVersion.history[0].state",description="Control Plane Progress",priority=1
 // +kubebuilder:printcolumn:name="DP Progress",type="string",JSONPath=".status.version.history[0].state",description="Data Plane Progress",priority=1
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || !has(oldSelf.spec.infraID) || (has(self.spec) && has(self.spec.infraID))",message="infraID cannot be removed once set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || !has(oldSelf.spec.clusterID) || (has(self.spec) && has(self.spec.clusterID))",message="clusterID cannot be removed once set"
 type HostedCluster struct {
 	metav1.TypeMeta `json:",inline"`
 	// metadata is the metadata for the HostedCluster.

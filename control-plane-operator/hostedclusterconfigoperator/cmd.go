@@ -32,14 +32,16 @@ import (
 	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/controllers/reencryption"
 	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/controllers/resources"
 	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/controllers/spotremediation"
+	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/controllers/usercabundle"
+	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/controllers/webhookvalidation"
 	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/operator"
 	hyperapi "github.com/openshift/hypershift/support/api"
 	"github.com/openshift/hypershift/support/capabilities"
+	"github.com/openshift/hypershift/support/imageregistry"
 	"github.com/openshift/hypershift/support/labelenforcingclient"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	"github.com/openshift/hypershift/support/supportedversion"
 	"github.com/openshift/hypershift/support/upsert"
-	"github.com/openshift/hypershift/support/util"
 
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
@@ -64,16 +66,18 @@ func NewCommand() *cobra.Command {
 }
 
 var controllerFuncs = map[string]operator.ControllerSetupFunc{
-	"controller-manager-ca":        cmca.Setup,
-	resources.ControllerName:       resources.Setup,
-	"inplaceupgrader":              inplaceupgrader.Setup,
-	"node":                         node.Setup,
-	nodecount.ControllerName:       nodecount.Setup,
-	"machine":                      machine.Setup,
-	"drainer":                      drainer.Setup,
-	hcpstatus.ControllerName:       hcpstatus.Setup,
-	spotremediation.ControllerName: spotremediation.Setup,
-	reencryption.ControllerName:    reencryption.Setup,
+	"controller-manager-ca":          cmca.Setup,
+	resources.ControllerName:         resources.Setup,
+	"inplaceupgrader":                inplaceupgrader.Setup,
+	"node":                           node.Setup,
+	nodecount.ControllerName:         nodecount.Setup,
+	"machine":                        machine.Setup,
+	"drainer":                        drainer.Setup,
+	hcpstatus.ControllerName:         hcpstatus.Setup,
+	spotremediation.ControllerName:   spotremediation.Setup,
+	reencryption.ControllerName:      reencryption.Setup,
+	usercabundle.ControllerName:      usercabundle.Setup,
+	webhookvalidation.ControllerName: webhookvalidation.Setup,
 }
 
 type HostedClusterConfigOperator struct {
@@ -264,7 +268,7 @@ func (o *HostedClusterConfigOperator) Run(ctx context.Context) error {
 	imageRegistryOverrides := map[string][]string{}
 	openShiftImgOverrides, ok := os.LookupEnv("OPENSHIFT_IMG_OVERRIDES")
 	if ok {
-		imageRegistryOverrides = util.ConvertImageRegistryOverrideStringToMap(openShiftImgOverrides)
+		imageRegistryOverrides = imageregistry.ConvertImageRegistryOverrideStringToMap(openShiftImgOverrides)
 	}
 	if len(o.registryOverrides) > 0 {
 		if imageRegistryOverrides == nil {
@@ -291,7 +295,7 @@ func (o *HostedClusterConfigOperator) Run(ctx context.Context) error {
 		OpenShiftImageRegistryOverrides: imageRegistryOverrides,
 	}
 
-	imageMetaDataProvider := &util.RegistryClientImageMetadataProvider{
+	imageMetaDataProvider := &imageregistry.RegistryClientImageMetadataProvider{
 		OpenShiftImageRegistryOverrides: imageRegistryOverrides,
 	}
 

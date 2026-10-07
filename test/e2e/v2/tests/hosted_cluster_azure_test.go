@@ -20,26 +20,28 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	routev1 "github.com/openshift/api/route/v1"
-
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	hcpmanifests "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
+	hcpmanifests "github.com/openshift/hypershift/pkg/manifests/cpo"
 	hyperapi "github.com/openshift/hypershift/support/api"
 	"github.com/openshift/hypershift/support/azureutil"
 	"github.com/openshift/hypershift/support/netutil"
 	e2eutil "github.com/openshift/hypershift/test/e2e/util"
 	"github.com/openshift/hypershift/test/e2e/v2/internal"
 
+	routev1 "github.com/openshift/api/route/v1"
+
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
+
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -50,26 +52,25 @@ func AzurePublicClusterTest(getTestCtx internal.TestContextGetter) {
 	Context("[Feature:AzureWorkloadIdentity] Azure Public Cluster", Label("Azure", "self-managed-azure-public"), func() {
 		BeforeEach(func() {
 			testCtx := getTestCtx()
-			hc := testCtx.GetHostedCluster()
-			if hc == nil || hc.Spec.Platform.Type != hyperv1.AzurePlatform {
-				Skip("Azure public cluster tests are only for Azure platform")
-			}
+			testCtx.SkipIfNotPlatform(hyperv1.AzurePlatform)
 		})
 
 		It("should mutate pods with workload identity federated credentials", func() {
-			e2eutil.GinkgoAtLeast(e2eutil.Version420)
 			testCtx := getTestCtx()
-			hc := testCtx.GetHostedCluster()
+			hc, err := testCtx.GetHostedCluster()
+			Expect(err).NotTo(HaveOccurred())
+			testCtx.SkipIfVersionBelow(e2eutil.Version420)
 			e2eutil.WaitForGuestKubeConfig(GinkgoTB(), testCtx.Context, testCtx.MgmtClient, hc)
-			hostedClusterClient := testCtx.GetHostedClusterClient()
-			Expect(hostedClusterClient).NotTo(BeNil(), "hosted cluster client is nil; HostedCluster may not have KubeConfig status set")
+			hostedClusterClient, err := testCtx.GetHostedClusterClient(hc)
+			Expect(err).NotTo(HaveOccurred())
 
 			e2eutil.ValidateAzureWorkloadIdentityWebhookMutation(GinkgoTB(), testCtx.Context, hostedClusterClient)
 		})
 
 		It("should have expected KAS allowed CIDRs", func() {
 			testCtx := getTestCtx()
-			hc := testCtx.GetHostedCluster()
+			hc, err := testCtx.GetHostedCluster()
+			Expect(err).NotTo(HaveOccurred())
 			kubeconfigData := e2eutil.WaitForGuestKubeConfig(GinkgoTB(), testCtx.Context, testCtx.MgmtClient, hc)
 			restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigData)
 			Expect(err).NotTo(HaveOccurred(), "failed to create hosted cluster REST config")
@@ -78,12 +79,13 @@ func AzurePublicClusterTest(getTestCtx internal.TestContextGetter) {
 		})
 
 		It("should have Ingress Operator configuration applied", func() {
-			e2eutil.GinkgoAtLeast(e2eutil.Version421)
 			testCtx := getTestCtx()
-			hc := testCtx.GetHostedCluster()
+			hc, err := testCtx.GetHostedCluster()
+			Expect(err).NotTo(HaveOccurred())
+			testCtx.SkipIfVersionBelow(e2eutil.Version421)
 			e2eutil.WaitForGuestKubeConfig(GinkgoTB(), testCtx.Context, testCtx.MgmtClient, hc)
-			hostedClusterClient := testCtx.GetHostedClusterClient()
-			Expect(hostedClusterClient).NotTo(BeNil(), "hosted cluster client is nil; HostedCluster may not have KubeConfig status set")
+			hostedClusterClient, err := testCtx.GetHostedClusterClient(hc)
+			Expect(err).NotTo(HaveOccurred())
 
 			e2eutil.ValidateIngressOperatorConfiguration(GinkgoTB(), testCtx.Context, hostedClusterClient, hc)
 		})
@@ -100,10 +102,9 @@ func AzurePrivateTopologyTest(getTestCtx internal.TestContextGetter) {
 
 		BeforeAll(func() {
 			testCtx = getTestCtx()
-			hc := testCtx.GetHostedCluster()
-			if hc == nil || hc.Spec.Platform.Type != hyperv1.AzurePlatform {
-				Skip("Azure private topology tests are only for Azure platform")
-			}
+			testCtx.SkipIfNotPlatform(hyperv1.AzurePlatform)
+			hc, err := testCtx.GetHostedCluster()
+			Expect(err).NotTo(HaveOccurred())
 			if hc.Spec.Platform.Azure == nil || hc.Spec.Platform.Azure.Topology != hyperv1.AzureTopologyPrivate {
 				Skip("Azure private topology tests require Private topology")
 			}
@@ -223,15 +224,13 @@ func AzurePrivateTopologyTest(getTestCtx internal.TestContextGetter) {
 func AzureEndpointAccessTransitionTest(getTestCtx internal.TestContextGetter) {
 	Context("[Feature:AzureEndpointAccess] Azure Endpoint Access Transition", Label("Azure", "self-managed-azure-private"), Ordered, func() {
 		var testCtx *internal.TestContext
-		var hc *hyperv1.HostedCluster
 		var controlPlaneNamespace string
 
 		BeforeAll(func() {
 			testCtx = getTestCtx()
-			hc = testCtx.GetHostedCluster()
-			if hc == nil || hc.Spec.Platform.Type != hyperv1.AzurePlatform {
-				Skip("Azure endpoint access transition tests are only for Azure platform")
-			}
+			testCtx.SkipIfNotPlatform(hyperv1.AzurePlatform)
+			hc, err := testCtx.GetHostedCluster()
+			Expect(err).NotTo(HaveOccurred())
 			if hc.Spec.Platform.Azure == nil || hc.Spec.Platform.Azure.Topology != hyperv1.AzureTopologyPrivate {
 				Skip("Azure endpoint access transition tests require Private topology")
 			}
@@ -239,9 +238,12 @@ func AzureEndpointAccessTransitionTest(getTestCtx internal.TestContextGetter) {
 			Expect(controlPlaneNamespace).NotTo(BeEmpty(), "control plane namespace must be set")
 
 			DeferCleanup(func() {
-				// Use context.Background() because DeferCleanup runs after the test completes,
-				// when testCtx.Context may already be canceled.
-				restoreErr := e2eutil.UpdateObject(GinkgoTB(), context.Background(), testCtx.MgmtClient, hc, func(obj *hyperv1.HostedCluster) {
+				freshHC, err := testCtx.GetHostedCluster()
+				if err != nil {
+					GinkgoTB().Logf("WARNING: failed to fetch HostedCluster for cleanup: %v", err)
+					return
+				}
+				restoreErr := e2eutil.UpdateObject(GinkgoTB(), testCtx.Context, testCtx.MgmtClient, freshHC, func(obj *hyperv1.HostedCluster) {
 					obj.Spec.Platform.Azure.Topology = hyperv1.AzureTopologyPrivate
 				})
 				if restoreErr != nil {
@@ -252,6 +254,8 @@ func AzureEndpointAccessTransitionTest(getTestCtx internal.TestContextGetter) {
 
 		It("should transition from Private to PublicAndPrivate", func() {
 			ctx := testCtx.Context
+			hc, err := testCtx.GetHostedCluster()
+			Expect(err).NotTo(HaveOccurred())
 
 			// Verify ExternalPrivateService resources exist in Private topology before transition.
 			e2eutil.EventuallyObject(GinkgoTB(), ctx, "KAS ExternalPrivateService exists in Private topology",
@@ -278,7 +282,7 @@ func AzureEndpointAccessTransitionTest(getTestCtx internal.TestContextGetter) {
 				e2eutil.WithTimeout(2*time.Minute),
 			)
 
-			err := e2eutil.UpdateObject(GinkgoTB(), ctx, testCtx.MgmtClient, hc, func(obj *hyperv1.HostedCluster) {
+			err = e2eutil.UpdateObject(GinkgoTB(), ctx, testCtx.MgmtClient, hc, func(obj *hyperv1.HostedCluster) {
 				obj.Spec.Platform.Azure.Topology = hyperv1.AzureTopologyPublicAndPrivate
 			})
 			Expect(err).NotTo(HaveOccurred(), "failed to update topology to PublicAndPrivate")
@@ -298,7 +302,7 @@ func AzureEndpointAccessTransitionTest(getTestCtx internal.TestContextGetter) {
 			Eventually(func() error {
 				route := hcpmanifests.KubeAPIServerExternalPrivateRoute(controlPlaneNamespace)
 				return expectDeleted(ctx, testCtx.MgmtClient, route)
-			}).WithTimeout(10 * time.Minute).WithPolling(10 * time.Second).Should(Succeed(),
+			}).WithTimeout(10*time.Minute).WithPolling(10*time.Second).Should(Succeed(),
 				"KAS external private route should be deleted after transition to PublicAndPrivate")
 
 			e2eutil.EventuallyObject(GinkgoTB(), ctx, "OAuth external public route exists after transition to PublicAndPrivate",
@@ -316,7 +320,7 @@ func AzureEndpointAccessTransitionTest(getTestCtx internal.TestContextGetter) {
 			Eventually(func() error {
 				route := hcpmanifests.OauthServerExternalPrivateRoute(controlPlaneNamespace)
 				return expectDeleted(ctx, testCtx.MgmtClient, route)
-			}).WithTimeout(10 * time.Minute).WithPolling(10 * time.Second).Should(Succeed(),
+			}).WithTimeout(10*time.Minute).WithPolling(10*time.Second).Should(Succeed(),
 				"OAuth external private route should be deleted after transition to PublicAndPrivate")
 
 			e2eutil.EventuallyObject(GinkgoTB(), ctx, "router-public Service is LoadBalancer after transition to PublicAndPrivate",
@@ -345,13 +349,13 @@ func AzureEndpointAccessTransitionTest(getTestCtx internal.TestContextGetter) {
 			Eventually(func() error {
 				svc := hcpmanifests.KubeAPIServerExternalPrivateService(controlPlaneNamespace)
 				return expectDeleted(ctx, testCtx.MgmtClient, svc)
-			}).WithTimeout(10 * time.Minute).WithPolling(10 * time.Second).Should(Succeed(),
+			}).WithTimeout(10*time.Minute).WithPolling(10*time.Second).Should(Succeed(),
 				"KAS ExternalPrivateService should be deleted after transition to PublicAndPrivate")
 
 			Eventually(func() error {
 				svc := hcpmanifests.OauthServerExternalPrivateService(controlPlaneNamespace)
 				return expectDeleted(ctx, testCtx.MgmtClient, svc)
-			}).WithTimeout(10 * time.Minute).WithPolling(10 * time.Second).Should(Succeed(),
+			}).WithTimeout(10*time.Minute).WithPolling(10*time.Second).Should(Succeed(),
 				"OAuth ExternalPrivateService should be deleted after transition to PublicAndPrivate")
 
 			verifyAPIReachable(testCtx, "after transition to PublicAndPrivate")
@@ -359,8 +363,10 @@ func AzureEndpointAccessTransitionTest(getTestCtx internal.TestContextGetter) {
 
 		It("should transition from PublicAndPrivate back to Private", func() {
 			ctx := testCtx.Context
+			hc, err := testCtx.GetHostedCluster()
+			Expect(err).NotTo(HaveOccurred())
 
-			err := e2eutil.UpdateObject(GinkgoTB(), ctx, testCtx.MgmtClient, hc, func(obj *hyperv1.HostedCluster) {
+			err = e2eutil.UpdateObject(GinkgoTB(), ctx, testCtx.MgmtClient, hc, func(obj *hyperv1.HostedCluster) {
 				obj.Spec.Platform.Azure.Topology = hyperv1.AzureTopologyPrivate
 			})
 			Expect(err).NotTo(HaveOccurred(), "failed to update topology to Private")
@@ -380,7 +386,7 @@ func AzureEndpointAccessTransitionTest(getTestCtx internal.TestContextGetter) {
 			Eventually(func() error {
 				route := hcpmanifests.KubeAPIServerExternalPublicRoute(controlPlaneNamespace)
 				return expectDeleted(ctx, testCtx.MgmtClient, route)
-			}).WithTimeout(10 * time.Minute).WithPolling(10 * time.Second).Should(Succeed(),
+			}).WithTimeout(10*time.Minute).WithPolling(10*time.Second).Should(Succeed(),
 				"KAS external public route should be deleted after restore to Private")
 
 			e2eutil.EventuallyObject(GinkgoTB(), ctx, "OAuth external private route exists after restore to Private",
@@ -398,13 +404,13 @@ func AzureEndpointAccessTransitionTest(getTestCtx internal.TestContextGetter) {
 			Eventually(func() error {
 				route := hcpmanifests.OauthServerExternalPublicRoute(controlPlaneNamespace)
 				return expectDeleted(ctx, testCtx.MgmtClient, route)
-			}).WithTimeout(10 * time.Minute).WithPolling(10 * time.Second).Should(Succeed(),
+			}).WithTimeout(10*time.Minute).WithPolling(10*time.Second).Should(Succeed(),
 				"OAuth external public route should be deleted after restore to Private")
 
 			Eventually(func() error {
 				svc := hcpmanifests.RouterPublicService(controlPlaneNamespace)
 				return expectDeleted(ctx, testCtx.MgmtClient, svc)
-			}).WithTimeout(10 * time.Minute).WithPolling(10 * time.Second).Should(Succeed(),
+			}).WithTimeout(10*time.Minute).WithPolling(10*time.Second).Should(Succeed(),
 				"router-public Service should be deleted after restore to Private")
 
 			e2eutil.EventuallyObjects(GinkgoTB(), ctx, "PLS CRs still exist after restore to Private",
@@ -451,7 +457,10 @@ func AzureEndpointAccessTransitionTest(getTestCtx internal.TestContextGetter) {
 			e2eutil.EventuallyObject(GinkgoTB(), testCtx.Context, "HostedCluster is Available and not Degraded after restore to Private",
 				func(ctx context.Context) (*hyperv1.HostedCluster, error) {
 					freshHC := &hyperv1.HostedCluster{}
-					err := testCtx.MgmtClient.Get(ctx, crclient.ObjectKeyFromObject(hc), freshHC)
+					err := testCtx.MgmtClient.Get(ctx, crclient.ObjectKey{
+						Namespace: testCtx.ClusterNamespace,
+						Name:      testCtx.ClusterName,
+					}, freshHC)
 					return freshHC, err
 				},
 				[]e2eutil.Predicate[*hyperv1.HostedCluster]{
@@ -541,7 +550,12 @@ func verifyAPIReachable(testCtx *internal.TestContext, phase string) {
 	attempts := 0
 	Eventually(func(g Gomega) {
 		attempts++
-		hc := testCtx.GetHostedCluster()
+		hc := &hyperv1.HostedCluster{}
+		err := testCtx.MgmtClient.Get(testCtx.Context, crclient.ObjectKey{
+			Namespace: testCtx.ClusterNamespace,
+			Name:      testCtx.ClusterName,
+		}, hc)
+		g.Expect(err).NotTo(HaveOccurred(), "failed to get hostedcluster")
 		g.Expect(hc).NotTo(BeNil(), "hosted cluster is nil %s", phase)
 		g.Expect(hc.Status.KubeConfig).NotTo(BeNil(), "hosted cluster kubeconfig status not set %s", phase)
 
@@ -598,7 +612,7 @@ func verifyAPIReachable(testCtx *internal.TestContext, phase string) {
 		nsList := &corev1.NamespaceList{}
 		g.Expect(freshClient.List(testCtx.Context, nsList)).To(Succeed(), "failed to list namespaces %s", phase)
 		g.Expect(nsList.Items).NotTo(BeEmpty(), "namespace list is empty %s", phase)
-	}).WithTimeout(15 * time.Minute).WithPolling(10 * time.Second).Should(Succeed(), "API server not reachable %s", phase)
+	}).WithTimeout(15*time.Minute).WithPolling(10*time.Second).Should(Succeed(), "API server not reachable %s", phase)
 }
 
 func extractHostname(host string) string {
@@ -622,22 +636,94 @@ func AzureOAuthLoadBalancerTest(getTestCtx internal.TestContextGetter) {
 	Context("[Feature:AzureOAuth] Azure OAuth LoadBalancer", Label("Azure", "self-managed-azure-oauth-lb"), func() {
 		BeforeEach(func() {
 			testCtx := getTestCtx()
-			hc := testCtx.GetHostedCluster()
-			if hc == nil || hc.Spec.Platform.Type != hyperv1.AzurePlatform {
-				Skip("Azure OAuth LB tests are only for Azure platform")
-			}
+			testCtx.SkipIfNotPlatform(hyperv1.AzurePlatform)
+			hc, err := testCtx.GetHostedCluster()
+			Expect(err).NotTo(HaveOccurred())
 			strategy := netutil.ServicePublishingStrategyByTypeByHC(hc, hyperv1.OAuthServer)
 			if strategy == nil || strategy.Type != hyperv1.LoadBalancer {
 				Skip("Azure OAuth LB tests require OAuthServer with LoadBalancer publishing strategy")
 			}
 		})
 
-		It("should create oauth-openshift Service as LoadBalancer with external IP", func() {
+		It("should create oauth-openshift Service as LoadBalancer with endpoint", func() {
 			testCtx := getTestCtx()
 			ctx := testCtx.Context
 			controlPlaneNamespace := testCtx.ControlPlaneNamespace
 
-			e2eutil.EventuallyObject(GinkgoTB(), ctx, "oauth-openshift Service is LoadBalancer with external IP",
+			e2eutil.EventuallyObject(GinkgoTB(), ctx, "oauth-openshift Service is LoadBalancer with endpoint",
+				func(ctx context.Context) (*corev1.Service, error) {
+					svc := hcpmanifests.OauthServerService(controlPlaneNamespace)
+					err := testCtx.MgmtClient.Get(ctx, crclient.ObjectKeyFromObject(svc), svc)
+					return svc, err
+				},
+				oauthServiceLBPredicates(),
+				e2eutil.WithTimeout(10*time.Minute),
+			)
+		})
+
+		It("should complete OAuth token flow through LoadBalancer endpoint", func() {
+			testCtx := getTestCtx()
+			hc, err := testCtx.GetHostedCluster()
+			Expect(err).NotTo(HaveOccurred())
+
+			e2eutil.ValidateOAuthWithIdentityProviderViaLoadBalancer(GinkgoTB(), testCtx.Context, testCtx.MgmtClient, hc)
+		})
+	})
+}
+
+// AzureOAuthLoadBalancerPrivateTest registers tests for Azure OAuth LoadBalancer
+// publishing validation in a private topology cluster.
+// These tests verify that:
+//   - The oauth-openshift Service is created as a LoadBalancer with an allocated endpoint
+//   - The Service carries the Azure internal LoadBalancer annotation
+//   - The OAuth token flow (kubeadmin + htpasswd IDP) works through that endpoint
+//
+// The OAuth token flow test uses a port-forward tunnel to the oauth-openshift pod
+// because the Azure internal LoadBalancer is not directly reachable from the CI
+// test runner.
+func AzureOAuthLoadBalancerPrivateTest(getTestCtx internal.TestContextGetter) {
+	Context("[Feature:AzureOAuth] Azure OAuth LoadBalancer in Private Topology", Label("Azure", "self-managed-azure-oauth-lb-private"), Ordered, func() {
+		var testCtx *internal.TestContext
+		var controlPlaneNamespace string
+		var hc *hyperv1.HostedCluster
+
+		BeforeAll(func() {
+			testCtx = getTestCtx()
+			var err error
+			hc, err = testCtx.GetHostedCluster()
+			Expect(err).NotTo(HaveOccurred(), "failed to get hosted cluster")
+			if hc == nil || hc.Spec.Platform.Type != hyperv1.AzurePlatform {
+				Skip("Azure OAuth LB Private tests are only for Azure platform")
+			}
+			if hc.Spec.Platform.Azure == nil || hc.Spec.Platform.Azure.Topology != hyperv1.AzureTopologyPrivate {
+				Skip("Azure OAuth LB Private tests require Private topology")
+			}
+			controlPlaneNamespace = testCtx.ControlPlaneNamespace
+			Expect(controlPlaneNamespace).NotTo(BeEmpty(), "control plane namespace must be set")
+
+			strategy := netutil.ServicePublishingStrategyByTypeByHC(hc, hyperv1.OAuthServer)
+			if strategy == nil || strategy.Type != hyperv1.LoadBalancer {
+				Skip("Azure OAuth LB Private tests require OAuthServer with LoadBalancer publishing strategy")
+			}
+		})
+
+		It("should create oauth-openshift Service as LoadBalancer with an allocated endpoint", Label(internal.InformingLabel), func() {
+			ctx := testCtx.Context
+
+			e2eutil.EventuallyObject(GinkgoTB(), ctx, "oauth-openshift Service is LoadBalancer with endpoint",
+				func(ctx context.Context) (*corev1.Service, error) {
+					svc := hcpmanifests.OauthServerService(controlPlaneNamespace)
+					err := testCtx.MgmtClient.Get(ctx, crclient.ObjectKeyFromObject(svc), svc)
+					return svc, err
+				},
+				oauthServiceLBPredicates(),
+				e2eutil.WithTimeout(10*time.Minute),
+			)
+		})
+
+		It("should have Azure internal LB annotation on oauth-openshift Service", Label(internal.InformingLabel), func() {
+			ctx := testCtx.Context
+			e2eutil.EventuallyObject(GinkgoTB(), ctx, "oauth-openshift Service has Azure internal LB annotation",
 				func(ctx context.Context) (*corev1.Service, error) {
 					svc := hcpmanifests.OauthServerService(controlPlaneNamespace)
 					err := testCtx.MgmtClient.Get(ctx, crclient.ObjectKeyFromObject(svc), svc)
@@ -645,35 +731,28 @@ func AzureOAuthLoadBalancerTest(getTestCtx internal.TestContextGetter) {
 				},
 				[]e2eutil.Predicate[*corev1.Service]{
 					func(svc *corev1.Service) (done bool, reasons string, err error) {
-						if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
-							return false, fmt.Sprintf("expected Service type LoadBalancer, got %s", svc.Spec.Type), nil
+						val, ok := svc.Annotations[azureutil.InternalLoadBalancerAnnotation]
+						if !ok || val != azureutil.InternalLoadBalancerValue {
+							return false, fmt.Sprintf("expected annotation %q to be %q, got %q (present: %v)",
+								azureutil.InternalLoadBalancerAnnotation, azureutil.InternalLoadBalancerValue, val, ok), nil
 						}
-						return true, "oauth-openshift Service is type LoadBalancer", nil
-					},
-					func(svc *corev1.Service) (done bool, reasons string, err error) {
-						if len(svc.Status.LoadBalancer.Ingress) == 0 {
-							return false, "LoadBalancer has no ingress entries yet", nil
-						}
-						ingress := svc.Status.LoadBalancer.Ingress[0]
-						if ingress.IP == "" && ingress.Hostname == "" {
-							return false, "LoadBalancer ingress has no IP or hostname", nil
-						}
-						host := ingress.IP
-						if host == "" {
-							host = ingress.Hostname
-						}
-						return true, fmt.Sprintf("oauth-openshift LoadBalancer has external endpoint: %s", host), nil
+						return true, "oauth-openshift Service has internal LB annotation", nil
 					},
 				},
 				e2eutil.WithTimeout(10*time.Minute),
 			)
 		})
 
-		It("should complete OAuth token flow through LoadBalancer endpoint", func() {
-			testCtx := getTestCtx()
-			hc := testCtx.GetHostedCluster()
-
-			e2eutil.ValidateOAuthWithIdentityProviderViaLoadBalancer(GinkgoTB(), testCtx.Context, testCtx.MgmtClient, hc)
+		It("should complete OAuth token flow through LoadBalancer endpoint", Label(internal.InformingLabel), func() {
+			ctx := testCtx.Context
+			oauthHost := e2eutil.WaitForOAuthLoadBalancerEndpoint(GinkgoTB(), ctx, testCtx.MgmtClient, hc)
+			pfTransport := e2eutil.SetupOAuthPortForwardTransport(GinkgoTB(), ctx, testCtx.MgmtClient, hc, oauthHost)
+			kasConfig := e2eutil.SetupGuestKASPortForwardConfig(GinkgoTB(), ctx, testCtx.MgmtClient, hc)
+			e2eutil.ValidateOAuthIdentityProviderFlow(GinkgoTB(), ctx, testCtx.MgmtClient, hc, oauthHost,
+				e2eutil.WithTransport(pfTransport), e2eutil.WithGuestConfig(kasConfig),
+				e2eutil.WithTransportFactory(func() http.RoundTripper {
+					return e2eutil.SetupOAuthPortForwardTransport(GinkgoTB(), ctx, testCtx.MgmtClient, hc, oauthHost)
+				}))
 		})
 	})
 }
@@ -684,6 +763,7 @@ func RegisterHostedClusterAzureTests(getTestCtx internal.TestContextGetter) {
 	AzurePrivateTopologyTest(getTestCtx)
 	AzureEndpointAccessTransitionTest(getTestCtx)
 	AzureOAuthLoadBalancerTest(getTestCtx)
+	AzureOAuthLoadBalancerPrivateTest(getTestCtx)
 }
 
 var _ = Describe("[sig-hypershift][Jira:Hypershift] Hosted Cluster Azure", Label("hosted-cluster-azure"), func() {
@@ -696,3 +776,30 @@ var _ = Describe("[sig-hypershift][Jira:Hypershift] Hosted Cluster Azure", Label
 
 	RegisterHostedClusterAzureTests(func() *internal.TestContext { return testCtx })
 })
+
+// oauthServiceLBPredicates returns predicates that verify the oauth-openshift Service
+// is type LoadBalancer and has an allocated ingress endpoint (IP or Hostname).
+func oauthServiceLBPredicates() []e2eutil.Predicate[*corev1.Service] {
+	return []e2eutil.Predicate[*corev1.Service]{
+		func(svc *corev1.Service) (done bool, reasons string, err error) {
+			if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+				return false, fmt.Sprintf("expected Service type LoadBalancer, got %s", svc.Spec.Type), nil
+			}
+			return true, "oauth-openshift Service is type LoadBalancer", nil
+		},
+		func(svc *corev1.Service) (done bool, reasons string, err error) {
+			if len(svc.Status.LoadBalancer.Ingress) == 0 {
+				return false, "LoadBalancer has no ingress entries yet", nil
+			}
+			ingress := svc.Status.LoadBalancer.Ingress[0]
+			if ingress.IP == "" && ingress.Hostname == "" {
+				return false, "LoadBalancer ingress has no IP or hostname", nil
+			}
+			host := ingress.IP
+			if host == "" {
+				host = ingress.Hostname
+			}
+			return true, fmt.Sprintf("oauth-openshift LoadBalancer endpoint ready: %s", host), nil
+		},
+	}
+}

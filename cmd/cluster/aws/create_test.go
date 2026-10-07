@@ -58,22 +58,22 @@ func TestValidateCreateCredentialInfo(t *testing.T) {
 		kubeconfigPath       string
 		expectError          bool
 	}{
-		"when CredentialSecretName is blank and aws-creds is also blank": {
+		"When CredentialSecretName and aws-creds are blank, it should return an error": {
 			expectError: true,
 		},
-		"when CredentialSecretName is blank, aws-creds is not blank, and pull-secret is blank": {
+		"When CredentialSecretName and pull-secret are blank and aws-creds is set, it should return an error": {
 			pullSecretFile:       "",
 			credentialSecretName: "",
 			credentials:          awsutil.AWSCredentialsOptions{AWSCredentialsFile: "asdf"},
 			expectError:          true,
 		},
-		"when CredentialSecretName is blank, aws-creds is not blank, and pull-secret is not blank": {
+		"When CredentialSecretName is blank and aws-creds and pull-secret are set, it should succeed": {
 			pullSecretFile:       "asdf",
 			credentialSecretName: "",
 			credentials:          awsutil.AWSCredentialsOptions{AWSCredentialsFile: "asdf"},
 			expectError:          false,
 		},
-		"when CredentialSecretName is set with invalid kubeconfig it should fail": {
+		"When CredentialSecretName is set with invalid kubeconfig, it should fail": {
 			credentialSecretName: "my-secret",
 			kubeconfigPath:       "/nonexistent/kubeconfig",
 			credentials:          awsutil.AWSCredentialsOptions{AWSCredentialsFile: "/some/creds"},
@@ -180,7 +180,7 @@ func TestCreateCluster(t *testing.T) {
 		args []string
 	}{
 		{
-			name: "minimal flags necessary to render",
+			name: "When minimal flags are provided, it should render successfully",
 			args: []string{
 				"--sts-creds=" + credentialsFile,
 				"--infra-json=" + infraFile,
@@ -192,7 +192,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "default creation flags for cesar",
+			name: "When default creation flags are provided, it should create cluster with expected configuration",
 			args: []string{
 				"--pull-secret=" + pullSecretFile,
 				"--name=example",
@@ -215,7 +215,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "minimal with KubeAPIServerDNSName",
+			name: "When KubeAPIServerDNSName is provided, it should configure custom DNS name",
 			args: []string{
 				"--name=example",
 				"--sts-creds=" + credentialsFile,
@@ -227,7 +227,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "minimal with OVNKubernetesMTU",
+			name: "When OVNKubernetesMTU is provided, it should configure custom MTU",
 			args: []string{
 				"--name=example",
 				"--sts-creds=" + credentialsFile,
@@ -296,4 +296,59 @@ func TestGenerateResources(t *testing.T) {
 		g.Expect(resources).To(HaveLen(1))
 		g.Expect(resources[0].GetLabels()).To(HaveKeyWithValue(util.DeleteWithClusterLabelName, "true"))
 	})
+}
+
+func TestValidateInitialStorageVolumesKMSKey(t *testing.T) {
+	tests := []struct {
+		name      string
+		kmsKeyARN string
+		region    string
+		expectErr string
+	}{
+		{
+			name:      "When no key is set, it should pass",
+			kmsKeyARN: "",
+			region:    "us-east-1",
+		},
+		{
+			name:      "When a valid key ARN in the cluster region is set, it should pass",
+			kmsKeyARN: "arn:aws:kms:us-east-1:123456789012:key/d3cdd9e0-3fd1-47a4-a559-72ae3672c5a6",
+			region:    "us-east-1",
+		},
+		{
+			name:      "When a valid alias ARN in the cluster region is set, it should pass",
+			kmsKeyARN: "arn:aws:kms:us-east-1:123456789012:alias/hypershift-ci",
+			region:    "us-east-1",
+		},
+		{
+			name:      "When the ARN is malformed, it should fail",
+			kmsKeyARN: "not-an-arn",
+			region:    "us-east-1",
+			expectErr: "must be a valid AWS KMS key ARN",
+		},
+		{
+			name:      "When the ARN has no key id after the slash, it should fail",
+			kmsKeyARN: "arn:aws:kms:us-east-1:123456789012:key/",
+			region:    "us-east-1",
+			expectErr: "must be a valid AWS KMS key ARN",
+		},
+		{
+			name:      "When the key is in a different region than the cluster, it should fail",
+			kmsKeyARN: "arn:aws:kms:us-west-2:123456789012:key/d3cdd9e0-3fd1-47a4-a559-72ae3672c5a6",
+			region:    "us-east-1",
+			expectErr: "must reference a key in the cluster region",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			err := validateInitialStorageVolumesKMSKey(tc.kmsKeyARN, tc.region)
+			if tc.expectErr == "" {
+				g.Expect(err).NotTo(HaveOccurred())
+			} else {
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(err.Error()).To(ContainSubstring(tc.expectErr))
+			}
+		})
+	}
 }

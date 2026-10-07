@@ -18,7 +18,7 @@ import (
 	hcpconfig "github.com/openshift/hypershift/support/config"
 	component "github.com/openshift/hypershift/support/controlplane-component"
 	"github.com/openshift/hypershift/support/globalconfig"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/reconcilerpolicy"
 
 	configv1 "github.com/openshift/api/config/v1"
 	kcpv1 "github.com/openshift/api/kubecontrolplane/v1"
@@ -89,6 +89,7 @@ func generateConfig(p KubeAPIServerConfigParams) (*kcpv1.KubeAPIServerConfig, er
 	if err != nil {
 		return nil, err
 	}
+
 	config := &kcpv1.KubeAPIServerConfig{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "KubeAPIServerConfig",
@@ -143,8 +144,6 @@ func generateConfig(p KubeAPIServerConfigParams) (*kcpv1.KubeAPIServerConfig, er
 					NamedCertificates: namedCertificates,
 					BindAddress:       fmt.Sprintf("0.0.0.0:%d", p.KASPodPort),
 					BindNetwork:       "tcp4",
-					CipherSuites:      hcpconfig.CipherSuites(p.TLSSecurityProfile),
-					MinTLSVersion:     hcpconfig.MinTLSVersion(p.TLSSecurityProfile),
 				},
 			},
 			CORSAllowedOrigins: corsAllowedOrigins(p.AdditionalCORSAllowedOrigins),
@@ -154,6 +153,10 @@ func generateConfig(p KubeAPIServerConfigParams) (*kcpv1.KubeAPIServerConfig, er
 		ProjectConfig:                projectConfig(p.DefaultNodeSelector),
 		ServiceAccountPublicKeyFiles: []string{cpath(serviceAccountKeyVolumeName, pki.ServiceSignerPublicKey)},
 		ServicesSubnet:               strings.Join(p.ServiceNetwork, ","),
+	}
+
+	if err := hcpconfig.ApplyServingInfoFromTLSProfile(&config.ServingInfo.ServingInfo, p.TLSSecurityProfile); err != nil {
+		return nil, err
 	}
 
 	if !slices.Contains(p.FeatureGates, "OpenShiftPodSecurityAdmission=true") {
@@ -195,7 +198,7 @@ func generateConfig(p KubeAPIServerConfigParams) (*kcpv1.KubeAPIServerConfig, er
 	args.Set("egress-selector-config-file", cpath(egressSelectorConfigVolumeName, EgressSelectorConfigKey))
 	args.Set("enable-admission-plugins", enabledAdmissionPlugins(p)...)
 	args.Set("disable-admission-plugins", disabledAdmissionPlugins(p)...)
-	if util.ConfigOAuthEnabled(p.Authentication) {
+	if reconcilerpolicy.ConfigOAuthEnabled(p.Authentication) {
 		args.Set("authentication-token-webhook-config-file", cpath(authTokenWebhookConfigVolumeName, KubeconfigKey))
 		args.Set("authentication-token-webhook-version", "v1")
 	} else {
@@ -244,9 +247,6 @@ func generateConfig(p KubeAPIServerConfigParams) (*kcpv1.KubeAPIServerConfig, er
 		}
 		if gate == "DynamicResourceAllocation=true" {
 			runtimeConfig = append(runtimeConfig, "resource.k8s.io/v1beta1=true")
-		}
-		if gate == "MutatingAdmissionPolicy=true" {
-			runtimeConfig = append(runtimeConfig, "admissionregistration.k8s.io/v1alpha1=true")
 		}
 		if gate == "VolumeAttributesClass=true" {
 			runtimeConfig = append(runtimeConfig, "storage.k8s.io/v1beta1=true")
@@ -365,7 +365,7 @@ func enabledAdmissionPlugins(cfg KubeAPIServerConfigParams) []string {
 		"storage.openshift.io/CSIInlineVolumeSecurity",
 	}
 
-	if util.ConfigOAuthEnabled(cfg.Authentication) {
+	if reconcilerpolicy.ConfigOAuthEnabled(cfg.Authentication) {
 		enabled = append(enabled, "authorization.openshift.io/RestrictSubjectBindings", "authorization.openshift.io/ValidateRoleBindingRestriction")
 	}
 
@@ -375,7 +375,7 @@ func enabledAdmissionPlugins(cfg KubeAPIServerConfigParams) []string {
 func disabledAdmissionPlugins(cfg KubeAPIServerConfigParams) []string {
 	disabled := []string{}
 
-	if !util.ConfigOAuthEnabled(cfg.Authentication) {
+	if !reconcilerpolicy.ConfigOAuthEnabled(cfg.Authentication) {
 		disabled = append(disabled, "authorization.openshift.io/RestrictSubjectBindings", "authorization.openshift.io/ValidateRoleBindingRestriction")
 	}
 

@@ -7,10 +7,11 @@ import (
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests/ignitionserver"
 	"github.com/openshift/hypershift/support/api"
+	"github.com/openshift/hypershift/support/config"
 	component "github.com/openshift/hypershift/support/controlplane-component"
+	"github.com/openshift/hypershift/support/imageregistry"
 	"github.com/openshift/hypershift/support/podspec"
 	"github.com/openshift/hypershift/support/proxy"
-	"github.com/openshift/hypershift/support/util"
 
 	configv1 "github.com/openshift/api/config/v1"
 
@@ -21,6 +22,10 @@ import (
 
 func (ign *ignitionServer) adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Deployment) error {
 	hcp := cpContext.HCP
+	tlsArgs, err := config.TLSArgs(hcp.Spec.Configuration.GetTLSSecurityProfile())
+	if err != nil {
+		return err
+	}
 
 	if hcp.Spec.Configuration != nil && hcp.Spec.Configuration.FeatureGate != nil {
 		featureGate := &configv1.FeatureGate{
@@ -50,13 +55,17 @@ func (ign *ignitionServer) adaptDeployment(cpContext component.WorkloadContext, 
 
 	podspec.UpdateContainer(ComponentName, deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
 		c.Args = append(c.Args,
-			"--registry-overrides", util.ConvertRegistryOverridesToCommandLineFlag(ign.releaseProvider.GetRegistryOverrides()),
+			"--registry-overrides", imageregistry.ConvertRegistryOverridesToCommandLineFlag(ign.releaseProvider.GetRegistryOverrides()),
 			"--platform", string(hcp.Spec.Platform.Type),
 		)
 
+		if len(tlsArgs) > 0 {
+			c.Args = append(c.Args, tlsArgs...)
+		}
+
 		podspec.UpsertEnvVar(c, corev1.EnvVar{
 			Name:  "OPENSHIFT_IMG_OVERRIDES",
-			Value: util.ConvertOpenShiftImageRegistryOverridesToCommandLineFlag(ign.releaseProvider.GetOpenShiftImageRegistryOverrides()),
+			Value: imageregistry.ConvertOpenShiftImageRegistryOverridesToCommandLineFlag(ign.releaseProvider.GetOpenShiftImageRegistryOverrides()),
 		})
 
 		proxy.SetEnvVars(&c.Env)

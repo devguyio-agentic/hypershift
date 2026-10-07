@@ -711,6 +711,70 @@ func TestCopyMCOOutputToMCC(t *testing.T) {
 	}
 }
 
+func TestCopyMCCConfigInputs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		setupDirs   func(t *testing.T, configDir string)
+		expectFiles []string
+		expectError bool
+	}{
+		{
+			name: "When config directory has both config files, it should copy them to mcc",
+			setupDirs: func(t *testing.T, configDir string) {
+				g := NewWithT(t)
+				g.Expect(os.WriteFile(filepath.Join(configDir, "cluster-apiserver-config.yaml"), []byte("apiserver-config"), 0644)).To(Succeed())
+				g.Expect(os.WriteFile(filepath.Join(configDir, "image-config.yaml"), []byte("image-config"), 0644)).To(Succeed())
+			},
+			expectFiles: []string{"cluster-apiserver-config.yaml", "image-config.yaml"},
+		},
+		{
+			name: "When cluster-apiserver-config.yaml is missing, it should return an error",
+			setupDirs: func(t *testing.T, configDir string) {
+				g := NewWithT(t)
+				g.Expect(os.WriteFile(filepath.Join(configDir, "image-config.yaml"), []byte("image-config"), 0644)).To(Succeed())
+			},
+			expectError: true,
+		},
+		{
+			name: "When image-config.yaml is missing, it should return an error",
+			setupDirs: func(t *testing.T, configDir string) {
+				g := NewWithT(t)
+				g.Expect(os.WriteFile(filepath.Join(configDir, "cluster-apiserver-config.yaml"), []byte("apiserver-config"), 0644)).To(Succeed())
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			g := NewWithT(t)
+
+			tmpDir := t.TempDir()
+			configDir := filepath.Join(tmpDir, "config")
+			mccDir := filepath.Join(tmpDir, "mcc")
+			g.Expect(os.MkdirAll(configDir, 0755)).To(Succeed())
+			g.Expect(os.MkdirAll(mccDir, 0755)).To(Succeed())
+
+			tt.setupDirs(t, configDir)
+
+			err := copyMCCConfigInputs(configDir, mccDir)
+			if tt.expectError {
+				g.Expect(err).To(HaveOccurred())
+				return
+			}
+
+			g.Expect(err).NotTo(HaveOccurred())
+			for _, f := range tt.expectFiles {
+				_, err := os.Stat(filepath.Join(mccDir, f))
+				g.Expect(err).NotTo(HaveOccurred(), "expected file %s to exist in mccDir", f)
+			}
+		})
+	}
+}
+
 func TestInvokeFeatureGateRenderScript(t *testing.T) {
 	t.Parallel()
 
@@ -1378,7 +1442,7 @@ func TestWriteOSImageStreamManifest(t *testing.T) {
 		{
 			name:                  "When osStream is rhel-10 it should write a valid OSImageStream CR with defaultStream rhel-10",
 			osStream:              "rhel-10",
-			expectedAPIVersion:    "machineconfiguration.openshift.io/v1alpha1",
+			expectedAPIVersion:    "machineconfiguration.openshift.io/v1",
 			expectedKind:          "OSImageStream",
 			expectedName:          "cluster",
 			expectedDefaultStream: "rhel-10",
@@ -1386,7 +1450,7 @@ func TestWriteOSImageStreamManifest(t *testing.T) {
 		{
 			name:                  "When osStream is rhel-9 it should write a valid OSImageStream CR with defaultStream rhel-9",
 			osStream:              "rhel-9",
-			expectedAPIVersion:    "machineconfiguration.openshift.io/v1alpha1",
+			expectedAPIVersion:    "machineconfiguration.openshift.io/v1",
 			expectedKind:          "OSImageStream",
 			expectedName:          "cluster",
 			expectedDefaultStream: "rhel-9",
@@ -1583,7 +1647,7 @@ func TestFetchMCSIgnitionPayload(t *testing.T) {
 			expectOk: false,
 		},
 		{
-			name: "When request succeeds, the correct Accept header should be sent",
+			name: "When request succeeds, it should send the correct Accept header",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				if r.Header.Get("Accept") != "application/vnd.coreos.ignition+json;version=3.2.0, */*;q=0.1" {
 					w.WriteHeader(http.StatusBadRequest)

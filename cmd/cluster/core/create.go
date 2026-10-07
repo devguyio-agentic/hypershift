@@ -18,6 +18,7 @@ import (
 	hyperapi "github.com/openshift/hypershift/support/api"
 	"github.com/openshift/hypershift/support/certs"
 	"github.com/openshift/hypershift/support/globalconfig"
+	"github.com/openshift/hypershift/support/imageregistry"
 	"github.com/openshift/hypershift/support/infraid"
 	"github.com/openshift/hypershift/support/releaseinfo/registryclient"
 	"github.com/openshift/hypershift/support/supportedversion"
@@ -323,7 +324,6 @@ func prototypeResources(ctx context.Context, opts *CreateOptions) (*resources, e
 			ControllerAvailabilityPolicy:     hyperv1.AvailabilityPolicy(opts.ControlPlaneAvailabilityPolicy),
 			InfrastructureAvailabilityPolicy: hyperv1.AvailabilityPolicy(opts.InfrastructureAvailabilityPolicy),
 			Configuration:                    &hyperv1.ClusterConfiguration{},
-			Capabilities:                     &hyperv1.Capabilities{},
 		},
 	}
 
@@ -402,6 +402,12 @@ func resolvePullSecret(opts *CreateOptions) ([]byte, error) {
 }
 
 func applyClusterCapabilities(cluster *hyperv1.HostedCluster, opts *CreateOptions) {
+	if len(opts.EnableClusterCapabilities) == 0 && len(opts.DisableClusterCapabilities) == 0 {
+		return
+	}
+	if cluster.Spec.Capabilities == nil {
+		cluster.Spec.Capabilities = &hyperv1.Capabilities{}
+	}
 	if len(opts.EnableClusterCapabilities) > 0 {
 		caps := make([]hyperv1.OptionalCapability, len(opts.EnableClusterCapabilities))
 		for i, c := range opts.EnableClusterCapabilities {
@@ -796,7 +802,7 @@ func (opts *RawCreateOptions) validateClusterExistence(ctx context.Context) erro
 	if err != nil {
 		return fmt.Errorf("could not retrieve kube clientset: %w", err)
 	}
-	if err := validateMgmtClusterAndNodePoolCPUArchitectures(ctx, opts, kc, &hyperutil.RegistryClientImageMetadataProvider{}); err != nil {
+	if err := validateMgmtClusterAndNodePoolCPUArchitectures(ctx, opts, kc, &imageregistry.RegistryClientImageMetadataProvider{}); err != nil {
 		if strings.Contains(err.Error(), "failed to retrieve manifest") {
 			opts.Log.Info("WARNING: Unable to access the payload, skipping the Architectures check.", "error", err.Error())
 		} else {
@@ -1089,10 +1095,9 @@ func defaultNodePool(opts *CreateOptions) func(platformType hyperv1.PlatformType
 	}
 }
 
-func GetIngressServicePublishingStrategyMapping(netType hyperv1.NetworkType, usesExternalDNS bool) []hyperv1.ServicePublishingStrategyMapping {
-	// TODO (Alberto): Default KAS to Route if endpointAccess is Private.
+func GetIngressServicePublishingStrategyMapping(netType hyperv1.NetworkType, usesExternalDNS bool, isPrivate bool) []hyperv1.ServicePublishingStrategyMapping {
 	apiServiceStrategy := hyperv1.LoadBalancer
-	if usesExternalDNS {
+	if usesExternalDNS || isPrivate {
 		apiServiceStrategy = hyperv1.Route
 	}
 	services := map[hyperv1.ServiceType]hyperv1.PublishingStrategyType{
@@ -1244,7 +1249,7 @@ func parseTolerationString(str string) (*corev1.Toleration, error) {
 // validateMgmtClusterAndNodePoolCPUArchitectures checks if a multi-arch release image or release stream was provided.
 // If none were provided, checks to make sure the NodePool CPU arch and the management cluster CPU arch match; if they
 // do not, the CLI will return an error since the NodePool will fail to complete during runtime.
-func validateMgmtClusterAndNodePoolCPUArchitectures(ctx context.Context, opts *RawCreateOptions, kc kubeclient.Interface, imageMetadataProvider hyperutil.ImageMetadataProvider) error {
+func validateMgmtClusterAndNodePoolCPUArchitectures(ctx context.Context, opts *RawCreateOptions, kc kubeclient.Interface, imageMetadataProvider imageregistry.ImageMetadataProvider) error {
 	validMultiArchImage := false
 
 	// Check if the release image is multi-arch

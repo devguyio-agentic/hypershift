@@ -1,6 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    hypershift.openshift.io/desired-state-hash: ad91e270afe4214b8672a51b7be0c6904d40bc06c70fb3de4f7dd03875aa416a
   labels:
     hypershift.openshift.io/managed-by: control-plane-operator
   name: openshift-controller-manager
@@ -83,6 +85,7 @@ spec:
         - --kubeconfig
         - /etc/kubernetes/secrets/svc-kubeconfig/kubeconfig
         - --namespace=openshift-controller-manager
+        - --v=2
         command:
         - openshift-controller-manager
         env:

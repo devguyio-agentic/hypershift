@@ -65,15 +65,6 @@ func PrivateRouterService(ns string) *corev1.Service {
 	}
 }
 
-func RouterPublicService(ns string) *corev1.Service {
-	return &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "router",
-			Namespace: ns,
-		},
-	}
-}
-
 func RouterConfigurationConfigMap(ns string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -97,6 +88,15 @@ func IngressDefaultIngressControllerCert() *corev1.Secret {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "default-ingress-cert",
 			Namespace: "openshift-ingress",
+		},
+	}
+}
+
+func ServiceProviderDefaultIngressServingCert(ns string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "service-provider-default-ingress-serving-cert",
+			Namespace: ns,
 		},
 	}
 }

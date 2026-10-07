@@ -21,8 +21,7 @@ import (
 var _ core.Platform = (*CreateOptions)(nil)
 
 const (
-	SATokenIssuerSecret   = "sa-token-issuer-key"
-	defaultGCPMachineType = "n2-standard-4"
+	SATokenIssuerSecret = "sa-token-issuer-key"
 
 	flagProject                       = "project"
 	flagRegion                        = "region"
@@ -127,8 +126,8 @@ func BindOptions(opts *RawCreateOptions, flags *pflag.FlagSet) {
 	flags.StringVar(&opts.ServiceAccountSigningKeyPath, flagServiceAccountSigningKeyPath, "", "The file to the private key for the service account token issuer")
 	flags.StringVar(&opts.EndpointAccess, flagEndpointAccess, string(hyperv1.GCPEndpointAccessPrivate), "Endpoint access type (Private or PublicAndPrivate)")
 	flags.StringVar(&opts.IssuerURL, flagIssuerURL, "", "The OIDC provider issuer URL")
-	flags.StringVar(&opts.MachineType, flagMachineType, "", "GCP machine type for node instances. Defaults to "+defaultGCPMachineType)
-	flags.StringVar(&opts.Zone, flagZone, "", "GCP zone for node instances (e.g. us-central1-a). Defaults to {region}-a")
+	flags.StringVar(&opts.MachineType, flagMachineType, "", util.GCPMachineTypeHelp)
+	flags.StringVar(&opts.Zone, flagZone, "", "GCP zone for node instances (e.g. us-central1-a). Required when --node-pool-replicas >= 0")
 	flags.StringVar(&opts.Subnet, flagSubnet, "", "Subnet name for node instances. Defaults to the PSC subnet value")
 	flags.StringVar(&opts.BootImage, flagBootImage, "", "GCP boot image for node instances. Overrides the default RHCOS image from the release payload")
 }
@@ -145,7 +144,7 @@ type validatedCreateOptions struct {
 }
 
 // Validate validates the GCP create cluster command options
-func (o *RawCreateOptions) Validate(_ context.Context, _ *core.CreateOptions) (core.PlatformCompleter, error) {
+func (o *RawCreateOptions) Validate(_ context.Context, opts *core.CreateOptions) (core.PlatformCompleter, error) {
 
 	if err := util.ValidateRequiredOption(flagProject, o.Project); err != nil {
 		return nil, err
@@ -185,6 +184,13 @@ func (o *RawCreateOptions) Validate(_ context.Context, _ *core.CreateOptions) (c
 	}
 	if err := util.ValidateRequiredOption(flagNetworkServiceAccount, o.NetworkServiceAccount); err != nil {
 		return nil, err
+	}
+	// Zone is only required when a NodePool will be created (NodePoolReplicas >= 0)
+	// opts == nil handles unit tests; production always passes completed opts
+	if opts == nil || opts.NodePoolReplicas >= 0 {
+		if err := util.ValidateRequiredOption(flagZone, o.Zone); err != nil {
+			return nil, err
+		}
 	}
 	return &ValidatedCreateOptions{
 		validatedCreateOptions: &validatedCreateOptions{
@@ -306,7 +312,7 @@ func (o *CreateOptions) ApplyPlatformSpecifics(hostedCluster *hyperv1.HostedClus
 		}
 	}
 
-	hostedCluster.Spec.Services = core.GetIngressServicePublishingStrategyMapping(hostedCluster.Spec.Networking.NetworkType, o.externalDNSDomain != "")
+	hostedCluster.Spec.Services = core.GetIngressServicePublishingStrategyMapping(hostedCluster.Spec.Networking.NetworkType, o.externalDNSDomain != "", false)
 
 	if o.externalDNSDomain != "" {
 		// Only APIServer and OAuthServer need external DNS routes.
@@ -335,24 +341,20 @@ func (o *CreateOptions) GenerateNodePools(constructor core.DefaultNodePoolConstr
 		nodePool.Spec.Management.UpgradeType = hyperv1.UpgradeTypeReplace
 	}
 
-	machineType := o.MachineType
-	if machineType == "" {
-		machineType = defaultGCPMachineType
-	}
 	zone := o.Zone
-	if zone == "" {
-		zone = o.Region + "-a"
-	}
 	subnet := o.Subnet
 	if subnet == "" {
 		subnet = o.PrivateServiceConnectSubnet
 	}
-	nodePool.Spec.Platform.GCP = &hyperv1.GCPNodePoolPlatform{
-		MachineType: machineType,
+
+	nodePool.Spec.Platform.GCP = util.BuildGCPNodePoolPlatform(util.GCPNodePoolPlatformOptions{
 		Zone:        zone,
-		Subnet:      hyperv1.GCPResourceName(subnet),
+		Subnet:      subnet,
+		MachineType: o.MachineType,
+		Arch:        nodePool.Spec.Arch,
 		Image:       o.BootImage,
-	}
+	})
+
 	return []*hyperv1.NodePool{nodePool}
 }
 

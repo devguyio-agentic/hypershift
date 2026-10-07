@@ -93,7 +93,7 @@ func TestValidateMgmtClusterAndNodePoolCPUArchitectures(t *testing.T) {
 		expectError bool
 	}{
 		{
-			name: "When a multi-arch release is passed, the function should return no errors",
+			name: "When a multi-arch release is passed, it should return no errors",
 			opts: &RawCreateOptions{
 				ReleaseImage:   "quay.io/openshift-release-dev/ocp-release:4.16.13-multi",
 				PullSecretFile: "../../../hack/dev/fakePullSecret.json",
@@ -103,7 +103,7 @@ func TestValidateMgmtClusterAndNodePoolCPUArchitectures(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name: "When no release image was passed and a valid multi-arch stream is passed, the function should return no errors",
+			name: "When no release image is provided and a valid multi-arch stream is passed, it should return no errors",
 			opts: &RawCreateOptions{
 				ReleaseImage:   "",
 				PullSecretFile: "../../../hack/dev/fakePullSecret.json",
@@ -113,7 +113,7 @@ func TestValidateMgmtClusterAndNodePoolCPUArchitectures(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name: "When a single arch release is passed and the NodePool arch matches the arch of the release, the function should return no errors",
+			name: "When a single arch release is passed and the NodePool arch matches the release arch, it should return no errors",
 			opts: &RawCreateOptions{
 				ReleaseImage:   "quay.io/openshift-release-dev/ocp-release:4.16.13-x86_64",
 				PullSecretFile: "../../../hack/dev/fakePullSecret.json",
@@ -123,7 +123,7 @@ func TestValidateMgmtClusterAndNodePoolCPUArchitectures(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name: "When a single arch release is passed and the NodePool arch doesn't match the arch of the release, the function should return an error",
+			name: "When a single arch release is passed and the NodePool arch doesn't match the release arch, it should return an error",
 			opts: &RawCreateOptions{
 				ReleaseImage:   "quay.io/openshift-release-dev/ocp-release:4.16.13-x86_64",
 				PullSecretFile: "../../../hack/dev/fakePullSecret.json",
@@ -832,12 +832,12 @@ func TestGetServicePublishingStrategyMapping(t *testing.T) {
 	}{
 		{
 			name:            "When GetIngressServicePublishingStrategyMapping is called with OVNKubernetes, it should not include deprecated service types",
-			services:        GetIngressServicePublishingStrategyMapping(hyperv1.OVNKubernetes, false),
+			services:        GetIngressServicePublishingStrategyMapping(hyperv1.OVNKubernetes, false, false),
 			checkDeprecated: true,
 		},
 		{
 			name:            "When GetIngressServicePublishingStrategyMapping is called with Other network type, it should not include deprecated service types",
-			services:        GetIngressServicePublishingStrategyMapping(hyperv1.Other, false),
+			services:        GetIngressServicePublishingStrategyMapping(hyperv1.Other, false, false),
 			checkDeprecated: true,
 		},
 		{
@@ -852,7 +852,7 @@ func TestGetServicePublishingStrategyMapping(t *testing.T) {
 		},
 		{
 			name:          "When GetIngressServicePublishingStrategyMapping is called, it should include all required service types",
-			services:      GetIngressServicePublishingStrategyMapping(hyperv1.Other, false),
+			services:      GetIngressServicePublishingStrategyMapping(hyperv1.Other, false, false),
 			checkRequired: true,
 			requiredTypes: requiredServiceTypes,
 		},
@@ -871,13 +871,19 @@ func TestGetServicePublishingStrategyMapping(t *testing.T) {
 		},
 		{
 			name:             "When GetIngressServicePublishingStrategyMapping is called without external DNS, it should use LoadBalancer for APIServer",
-			services:         GetIngressServicePublishingStrategyMapping(hyperv1.OVNKubernetes, false),
+			services:         GetIngressServicePublishingStrategyMapping(hyperv1.OVNKubernetes, false, false),
 			checkStrategy:    true,
 			expectedStrategy: hyperv1.LoadBalancer,
 		},
 		{
 			name:             "When GetIngressServicePublishingStrategyMapping is called with external DNS, it should use Route for APIServer",
-			services:         GetIngressServicePublishingStrategyMapping(hyperv1.OVNKubernetes, true),
+			services:         GetIngressServicePublishingStrategyMapping(hyperv1.OVNKubernetes, true, false),
+			checkStrategy:    true,
+			expectedStrategy: hyperv1.Route,
+		},
+		{
+			name:             "When GetIngressServicePublishingStrategyMapping is called with isPrivate, it should use Route for APIServer",
+			services:         GetIngressServicePublishingStrategyMapping(hyperv1.OVNKubernetes, false, true),
 			checkStrategy:    true,
 			expectedStrategy: hyperv1.Route,
 		},
@@ -1682,11 +1688,13 @@ func TestValidateArchAndFeatureSet(t *testing.T) {
 
 func TestApplyClusterCapabilities(t *testing.T) {
 	tests := []struct {
-		name           string
-		enableCaps     []string
-		disableCaps    []string
-		expectEnabled  []hyperv1.OptionalCapability
-		expectDisabled []hyperv1.OptionalCapability
+		name                  string
+		enableCaps            []string
+		disableCaps           []string
+		expectEnabled         []hyperv1.OptionalCapability
+		expectDisabled        []hyperv1.OptionalCapability
+		startWithNilCaps      bool
+		expectNilCapabilities bool
 	}{
 		{
 			name:           "When both enable and disable capabilities are provided, it should set both",
@@ -1703,15 +1711,21 @@ func TestApplyClusterCapabilities(t *testing.T) {
 		{
 			name: "When neither enable nor disable are provided, it should not set capabilities",
 		},
+		{
+			name:                  "When Capabilities starts as nil and no flags are provided, it should stay nil",
+			startWithNilCaps:      true,
+			expectNilCapabilities: true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			g := NewWithT(t)
 			cluster := &hyperv1.HostedCluster{
-				Spec: hyperv1.HostedClusterSpec{
-					Capabilities: &hyperv1.Capabilities{},
-				},
+				Spec: hyperv1.HostedClusterSpec{},
+			}
+			if !tc.startWithNilCaps {
+				cluster.Spec.Capabilities = &hyperv1.Capabilities{}
 			}
 			opts := &CreateOptions{
 				completedCreateOptions: &completedCreateOptions{
@@ -1728,15 +1742,19 @@ func TestApplyClusterCapabilities(t *testing.T) {
 
 			applyClusterCapabilities(cluster, opts)
 
-			if tc.expectEnabled != nil {
-				g.Expect(cluster.Spec.Capabilities.Enabled).To(Equal(tc.expectEnabled))
+			if tc.expectNilCapabilities {
+				g.Expect(cluster.Spec.Capabilities).To(BeNil())
 			} else {
-				g.Expect(cluster.Spec.Capabilities.Enabled).To(BeNil())
-			}
-			if tc.expectDisabled != nil {
-				g.Expect(cluster.Spec.Capabilities.Disabled).To(Equal(tc.expectDisabled))
-			} else {
-				g.Expect(cluster.Spec.Capabilities.Disabled).To(BeNil())
+				if tc.expectEnabled != nil {
+					g.Expect(cluster.Spec.Capabilities.Enabled).To(Equal(tc.expectEnabled))
+				} else {
+					g.Expect(cluster.Spec.Capabilities.Enabled).To(BeNil())
+				}
+				if tc.expectDisabled != nil {
+					g.Expect(cluster.Spec.Capabilities.Disabled).To(Equal(tc.expectDisabled))
+				} else {
+					g.Expect(cluster.Spec.Capabilities.Disabled).To(BeNil())
+				}
 			}
 		})
 	}
@@ -1779,7 +1797,7 @@ func TestValidateClusterExistence(t *testing.T) {
 		expectError bool
 		errorMsg    string
 	}{
-		"When the cluster does not exist it should succeed": {
+		"When the cluster does not exist, it should succeed": {
 			opts: &RawCreateOptions{
 				Namespace: "test-ns",
 				Name:      "test-cluster",
@@ -1787,7 +1805,7 @@ func TestValidateClusterExistence(t *testing.T) {
 			client:      fake.NewClientBuilder().WithScheme(scheme).Build(),
 			expectError: false,
 		},
-		"When the cluster already exists it should return an error": {
+		"When the cluster already exists, it should return an error": {
 			opts: &RawCreateOptions{
 				Namespace: "test-ns",
 				Name:      "test-cluster",
@@ -1803,7 +1821,7 @@ func TestValidateClusterExistence(t *testing.T) {
 			expectError: true,
 			errorMsg:    "already exists",
 		},
-		"When the API server returns a transient timeout it should retry and succeed": {
+		"When the API server returns a transient timeout, it should retry and succeed": {
 			opts: &RawCreateOptions{
 				Namespace: "test-ns",
 				Name:      "test-cluster",
@@ -1811,7 +1829,7 @@ func TestValidateClusterExistence(t *testing.T) {
 			client:      &transientErrorClient{callsBeforeSuccess: 2, scheme: scheme},
 			expectError: false,
 		},
-		"When the API server returns persistent timeouts it should eventually fail": {
+		"When the API server returns persistent timeouts, it should eventually fail": {
 			opts: &RawCreateOptions{
 				Namespace: "test-ns",
 				Name:      "test-cluster",
@@ -1820,7 +1838,7 @@ func TestValidateClusterExistence(t *testing.T) {
 			expectError: true,
 			errorMsg:    "hostedcluster doesn't exist validation failed",
 		},
-		"When the API server returns a forbidden error it should fail immediately without retry": {
+		"When the API server returns a forbidden error, it should fail immediately without retry": {
 			opts: &RawCreateOptions{
 				Namespace: "test-ns",
 				Name:      "test-cluster",
@@ -1829,7 +1847,7 @@ func TestValidateClusterExistence(t *testing.T) {
 			expectError: true,
 			errorMsg:    "forbidden",
 		},
-		"When the API server returns a service unavailable error it should retry and succeed": {
+		"When the API server returns a service unavailable error, it should retry and succeed": {
 			opts: &RawCreateOptions{
 				Namespace: "test-ns",
 				Name:      "test-cluster",
@@ -1837,7 +1855,7 @@ func TestValidateClusterExistence(t *testing.T) {
 			client:      &transientErrorClient{callsBeforeSuccess: 2, scheme: scheme, errFunc: func() error { return apierrors.NewServiceUnavailable("service unavailable") }},
 			expectError: false,
 		},
-		"When the API server times out then finds the cluster exists it should return already exists": {
+		"When the API server times out then finds the cluster exists, it should return already exists": {
 			opts: &RawCreateOptions{
 				Namespace: "test-ns",
 				Name:      "test-cluster",

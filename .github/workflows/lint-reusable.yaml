@@ -20,12 +20,8 @@ jobs:
           if [ -n "${{ github.base_ref }}" ]; then
             git fetch origin "${{ github.base_ref }}:${{ github.base_ref }}"
           fi
-      - name: Use pre-built lint tools
-        run: |
-          if [ -d /opt/lint-tools ]; then
-            mkdir -p hack/tools/bin
-            cp /opt/lint-tools/golangci-lint hack/tools/bin/
-            cp /opt/lint-tools/kube-api-linter.so hack/tools/bin/
-            touch hack/tools/bin/golangci-lint hack/tools/bin/kube-api-linter.so
-          fi
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: hack/tools/bin
+          key: lint-tools-${{ hashFiles('Makefile', 'hack/tools/go.mod', 'hack/tools/go.sum', 'hack/tools/hypershiftlinter/**/*.go') }}
       - run: make lint

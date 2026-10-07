@@ -28,8 +28,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	cpomanifests "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
-	etcdrecoverymanifests "github.com/openshift/hypershift/hypershift-operator/controllers/manifests/etcdrecovery"
+	cpomanifests "github.com/openshift/hypershift/pkg/manifests/cpo"
+	etcdrecoverymanifests "github.com/openshift/hypershift/pkg/manifests/etcdrecovery"
 	e2eutil "github.com/openshift/hypershift/test/e2e/util"
 	"github.com/openshift/hypershift/test/e2e/v2/internal"
 
@@ -122,11 +122,13 @@ func EtcdSingleMemberRecoveryTest(getTestCtx internal.TestContextGetter) {
 func EtcdKillRandomMembersTest(getTestCtx internal.TestContextGetter) {
 	It("should preserve data when random members are repeatedly killed", func() {
 		testCtx := getTestCtx()
-		testCtx.ValidateHostedClusterClient()
 		ctx := testCtx.Context
 		cpNamespace := testCtx.ControlPlaneNamespace
 
-		hcClient := testCtx.GetHostedClusterClient()
+		hc, err := testCtx.GetHostedCluster()
+		Expect(err).NotTo(HaveOccurred())
+		hcClient, err := testCtx.GetHostedClusterClient(hc)
+		Expect(err).NotTo(HaveOccurred())
 
 		// Create marker data that should survive the chaos
 		markerCM := createMarkerConfigMap(ctx, hcClient)
@@ -170,11 +172,13 @@ func EtcdKillRandomMembersTest(getTestCtx internal.TestContextGetter) {
 func EtcdKillAllMembersTest(getTestCtx internal.TestContextGetter) {
 	It("should preserve data when all members are killed simultaneously", func() {
 		testCtx := getTestCtx()
-		testCtx.ValidateHostedClusterClient()
 		ctx := testCtx.Context
 		cpNamespace := testCtx.ControlPlaneNamespace
 
-		hcClient := testCtx.GetHostedClusterClient()
+		hc, err := testCtx.GetHostedCluster()
+		Expect(err).NotTo(HaveOccurred())
+		hcClient, err := testCtx.GetHostedClusterClient(hc)
+		Expect(err).NotTo(HaveOccurred())
 
 		// Create marker data that should survive the chaos
 		markerCM := createMarkerConfigMap(ctx, hcClient)

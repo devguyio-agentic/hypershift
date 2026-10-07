@@ -23,6 +23,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -126,6 +127,9 @@ spec:
 	expectedGlobalConfigString := `{"metadata":{"name":"cluster","creationTimestamp":null},"spec":{"trustedCA":{"name":""}},"status":{}}
 {"metadata":{"name":"cluster","creationTimestamp":null},"spec":{"additionalTrustedCA":{"name":""},"registrySources":{}},"status":{}}
 `
+	// For release versions >= 4.23.0, the TLS security profile is additionally included in the config hash.
+	expectedGlobalConfigStringWithAPIServer := expectedGlobalConfigString + `null
+`
 
 	hostedCluster := &hyperv1.HostedCluster{
 		TypeMeta: metav1.TypeMeta{},
@@ -148,6 +152,7 @@ spec:
 		hostedCluster              *hyperv1.HostedCluster
 		config                     []crclient.Object
 		expectedMCORawConfig       string
+		expectedGlobalConfig       string
 		client                     bool
 		expectedHash               string
 		expectedHashWithoutVersion string
@@ -157,6 +162,7 @@ spec:
 			name:                       "When all input is given it should not return an error",
 			expectedHash:               "83935368",
 			expectedHashWithoutVersion: "0db5756d",
+			expectedGlobalConfig:       expectedGlobalConfigString,
 			nodePool:                   &hyperv1.NodePool{},
 			releaseImage: &releaseinfo.ReleaseImage{
 				ImageStream: &imageapi.ImageStream{
@@ -189,6 +195,7 @@ spec:
 			name:                       "When nodepool has configs it should populate mcoRawConfig ",
 			expectedHash:               "af67f27c",
 			expectedHashWithoutVersion: "fef02451",
+			expectedGlobalConfig:       expectedGlobalConfigString,
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "test",
@@ -254,6 +261,7 @@ spec:
 			name:                       "When release version is 4.18.0 with no osImageStream it should produce baseline hash",
 			expectedHash:               "83935368",
 			expectedHashWithoutVersion: "0db5756d",
+			expectedGlobalConfig:       expectedGlobalConfigString,
 			nodePool:                   &hyperv1.NodePool{},
 			releaseImage: &releaseinfo.ReleaseImage{
 				ImageStream: &imageapi.ImageStream{
@@ -270,6 +278,7 @@ spec:
 			name:                       "When osImageStream is set to version-derived default it should produce the same hash as no stream",
 			expectedHash:               "83935368",
 			expectedHashWithoutVersion: "0db5756d",
+			expectedGlobalConfig:       expectedGlobalConfigString,
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					OSImageStream: hyperv1.OSImageStreamReference{Name: "rhel-9"},
@@ -288,8 +297,9 @@ spec:
 		},
 		{
 			name:                       "When osImageStream is set to non-default it should produce a different hash",
-			expectedHash:               "ccd46cc1",
+			expectedHash:               "3d08ada8",
 			expectedHashWithoutVersion: "3a158178",
+			expectedGlobalConfig:       expectedGlobalConfigStringWithAPIServer,
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					OSImageStream: hyperv1.OSImageStreamReference{Name: "rhel-9"},
@@ -308,8 +318,9 @@ spec:
 		},
 		{
 			name:                       "When release version is 5.0.0 with no osImageStream it should normalize rhelStream to empty",
-			expectedHash:               "ff80e2c8",
+			expectedHash:               "bc411add",
 			expectedHashWithoutVersion: "0db5756d",
+			expectedGlobalConfig:       expectedGlobalConfigStringWithAPIServer,
 			nodePool:                   &hyperv1.NodePool{},
 			releaseImage: &releaseinfo.ReleaseImage{
 				ImageStream: &imageapi.ImageStream{
@@ -324,8 +335,9 @@ spec:
 		},
 		{
 			name:                       "When osImageStream is rhel-10 on 5.0.0 it should normalize to empty and match unset hash",
-			expectedHash:               "ff80e2c8",
+			expectedHash:               "bc411add",
 			expectedHashWithoutVersion: "0db5756d",
+			expectedGlobalConfig:       expectedGlobalConfigStringWithAPIServer,
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					OSImageStream: hyperv1.OSImageStreamReference{Name: "rhel-10"},
@@ -344,8 +356,9 @@ spec:
 		},
 		{
 			name:                       "When runc ContainerRuntimeConfig on 5.0.0 with explicit rhel-9, it should normalize rhelStream to empty",
-			expectedHash:               "72ea1773",
+			expectedHash:               "ff007b24",
 			expectedHashWithoutVersion: "6d5a7b66",
+			expectedGlobalConfig:       expectedGlobalConfigStringWithAPIServer,
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "test",
@@ -373,8 +386,9 @@ spec:
 		},
 		{
 			name:                       "When runc ContainerRuntimeConfig on 5.0.0 with no osImageStream, it should match explicit rhel-9 hash",
-			expectedHash:               "72ea1773",
+			expectedHash:               "ff007b24",
 			expectedHashWithoutVersion: "6d5a7b66",
+			expectedGlobalConfig:       expectedGlobalConfigStringWithAPIServer,
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "test",
@@ -463,7 +477,13 @@ spec:
 				client = fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(fakeObjects...).Build()
 			}
 
-			cg, err := NewConfigGenerator(t.Context(), client, tc.hostedCluster, tc.nodePool, tc.releaseImage, "", "test-test")
+			resolvedStream := StreamRHEL9
+			if tc.releaseImage != nil && client != nil {
+				if s, resolveErr := GetRHELStreamForBootImage(t.Context(), client, tc.nodePool, tc.releaseImage, false); resolveErr == nil {
+					resolvedStream = s
+				}
+			}
+			cg, err := NewConfigGenerator(t.Context(), client, tc.hostedCluster, tc.nodePool, tc.releaseImage, "", "test-test", resolvedStream)
 			if tc.error != nil {
 				g.Expect(err).To(HaveOccurred())
 				g.Expect(err.Error()).To(Equal(tc.error.Error()))
@@ -482,7 +502,7 @@ spec:
 			}
 
 			if tc.hostedCluster.Spec.Configuration != nil {
-				if diff := cmp.Diff(cg.globalConfig, expectedGlobalConfigString); diff != "" {
+				if diff := cmp.Diff(cg.globalConfig, tc.expectedGlobalConfig); diff != "" {
 					t.Errorf("actual config differs from expected: %s", diff)
 				}
 			}
@@ -596,7 +616,7 @@ func TestHash(t *testing.T) {
 		expected                  string
 	}{
 		{
-			name:                      "Base case",
+			name:                      "When base case inputs are used, it should produce the base case hash",
 			mcoRawConfig:              baseCaseMCORawConfig,
 			releaseVersion:            baseCaseReleaseVersion,
 			pullSecretName:            baseCasePullSecretName,
@@ -605,7 +625,7 @@ func TestHash(t *testing.T) {
 			expected:                  baseCaseHash,
 		},
 		{
-			name:                      "A different version should change the hash",
+			name:                      "When a different version is used, it should change the hash",
 			mcoRawConfig:              baseCaseMCORawConfig,
 			releaseVersion:            "4.8.0",
 			pullSecretName:            baseCasePullSecretName,
@@ -614,7 +634,7 @@ func TestHash(t *testing.T) {
 			expected:                  "27bb7699",
 		},
 		{
-			name:                      "A different mcoRawConfig should change the hash",
+			name:                      "When a different mcoRawConfig is used, it should change the hash",
 			mcoRawConfig:              "different",
 			releaseVersion:            baseCaseReleaseVersion,
 			pullSecretName:            baseCasePullSecretName,
@@ -623,7 +643,7 @@ func TestHash(t *testing.T) {
 			expected:                  "25f99ac5",
 		},
 		{
-			name:                      "A different pullSecretName should change the hash",
+			name:                      "When a different pullSecretName is used, it should change the hash",
 			mcoRawConfig:              baseCaseMCORawConfig,
 			releaseVersion:            baseCaseReleaseVersion,
 			pullSecretName:            "different",
@@ -632,7 +652,7 @@ func TestHash(t *testing.T) {
 			expected:                  "d0d6f6e9",
 		},
 		{
-			name:                      "A different trust-bundle should change the hash",
+			name:                      "When a different trust-bundle is used, it should change the hash",
 			mcoRawConfig:              baseCaseMCORawConfig,
 			releaseVersion:            baseCaseReleaseVersion,
 			pullSecretName:            baseCasePullSecretName,
@@ -641,7 +661,7 @@ func TestHash(t *testing.T) {
 			expected:                  "42d42744",
 		},
 		{
-			name:                      "A different globalConfig should change the hash",
+			name:                      "When a different globalConfig is used, it should change the hash",
 			mcoRawConfig:              baseCaseMCORawConfig,
 			releaseVersion:            baseCaseReleaseVersion,
 			pullSecretName:            baseCasePullSecretName,
@@ -685,7 +705,7 @@ func TestHash(t *testing.T) {
 			hash := cg.Hash()
 			g.Expect(hash).ToNot(BeEmpty())
 			g.Expect(hash).To(Equal(tc.expected))
-			if tc.name != "Base case" {
+			if tc.name != "When base case inputs are used, it should produce the base case hash" {
 				g.Expect(hash).ToNot(Equal(baseCaseHash))
 			}
 		})
@@ -710,7 +730,7 @@ func TestHashWithoutVersion(t *testing.T) {
 		expected                  string
 	}{
 		{
-			name:                      "Base case",
+			name:                      "When base case inputs are used, it should produce the base case hash",
 			mcoRawConfig:              baseCaseMCORawConfig,
 			releaseVersion:            baseCaseReleaseVersion,
 			pullSecretName:            baseCasePullSecretName,
@@ -719,7 +739,7 @@ func TestHashWithoutVersion(t *testing.T) {
 			expected:                  baseCaseHash,
 		},
 		{
-			name:                      "A different version should not change the hash",
+			name:                      "When a different version is used, it should not change the hash",
 			mcoRawConfig:              baseCaseMCORawConfig,
 			releaseVersion:            "4.8.0",
 			pullSecretName:            baseCasePullSecretName,
@@ -728,7 +748,7 @@ func TestHashWithoutVersion(t *testing.T) {
 			expected:                  baseCaseHash,
 		},
 		{
-			name:                      "A different mcoRawConfig should change the hash",
+			name:                      "When a different mcoRawConfig is used, it should change the hash",
 			mcoRawConfig:              "different",
 			releaseVersion:            baseCaseReleaseVersion,
 			pullSecretName:            baseCasePullSecretName,
@@ -737,7 +757,7 @@ func TestHashWithoutVersion(t *testing.T) {
 			expected:                  "5ea671c5",
 		},
 		{
-			name:                      "A different pullSecretName should change the hash",
+			name:                      "When a different pullSecretName is used, it should change the hash",
 			mcoRawConfig:              baseCaseMCORawConfig,
 			releaseVersion:            baseCaseReleaseVersion,
 			pullSecretName:            "different",
@@ -746,7 +766,7 @@ func TestHashWithoutVersion(t *testing.T) {
 			expected:                  "f6e82eb7",
 		},
 		{
-			name:                      "A different trust-bundle should change the hash",
+			name:                      "When a different trust-bundle is used, it should change the hash",
 			mcoRawConfig:              baseCaseMCORawConfig,
 			releaseVersion:            baseCaseReleaseVersion,
 			pullSecretName:            baseCasePullSecretName,
@@ -757,7 +777,7 @@ func TestHashWithoutVersion(t *testing.T) {
 		{
 			// TODO(alberto): This was left inconsistent in https://github.com/openshift/hypershift/pull/3795/files. It should also contain cg.globalConfig.
 			// This is kept like this for now to contain the scope of the refactor and avoid backward compatibility issues.
-			name:                      "A different globalConfig should NOT change the hash",
+			name:                      "When a different globalConfig is used, it should NOT change the hash",
 			mcoRawConfig:              baseCaseMCORawConfig,
 			releaseVersion:            baseCaseReleaseVersion,
 			pullSecretName:            baseCasePullSecretName,
@@ -1155,7 +1175,7 @@ status:
 		error             bool
 	}{
 		{
-			name: "gets a single valid MachineConfig",
+			name: "When a single valid MachineConfig is provided, it should return the defaulted config",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -1185,7 +1205,7 @@ status:
 			error:  false,
 		},
 		{
-			name: "gets three valid MachineConfig, two of them in a single config-map",
+			name: "When three valid MachineConfigs are provided in two config-maps, it should return all defaulted configs",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -1226,7 +1246,7 @@ status:
 			error:  false,
 		},
 		{
-			name: "fails if a non existent config is referenced",
+			name: "When a non-existent config is referenced, it should fail",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -1245,7 +1265,7 @@ status:
 			error:  true,
 		},
 		{
-			name: "gets a single valid ContainerRuntimeConfig",
+			name: "When a single valid ContainerRuntimeConfig is provided, it should return the defaulted config",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -1273,7 +1293,7 @@ status:
 			error:  false,
 		},
 		{
-			name: "gets a single valid MachineConfig with a core MachineConfig",
+			name: "When a valid MachineConfig with a core MachineConfig is provided, it should return both defaulted configs",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -1338,7 +1358,7 @@ status:
 			error:  false,
 		},
 		{
-			name: "gets a single valid MachineConfig with a core MachineConfig and ignores independent namespace",
+			name: "When a valid MachineConfig with a core MachineConfig and independent namespace is provided, it should ignore the independent namespace",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -1412,7 +1432,7 @@ status:
 			error:  false,
 		},
 		{
-			name: "No configs, missingConfigs error is returned",
+			name: "When no configs are provided, it should return missingConfigs error",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -1422,7 +1442,7 @@ status:
 			error:             true,
 		},
 		{
-			name: "Nodepool controller generates HAProxy config",
+			name: "When HAProxy config is set, it should include it in the generated config",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -1474,7 +1494,7 @@ status:
 			expect: haproxyIgnititionConfig + "\n---\n" + machineConfig1Defaulted, // + "\n---\n" + machineConfig1Defaulted,
 		},
 		{
-			name: "gets a single valid KubeletConfig",
+			name: "When a single valid KubeletConfig is provided, it should return the defaulted config",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -1504,7 +1524,7 @@ status:
 			error:  false,
 		},
 		{
-			name: "gets two valid KubeletConfig",
+			name: "When two valid KubeletConfigs are provided, it should return both defaulted configs",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -1545,7 +1565,7 @@ status:
 			error:  false,
 		},
 		{
-			name: "It should fail if spec.Configs has unsupported content",
+			name: "When spec.Configs has unsupported content, it should fail",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -1854,7 +1874,7 @@ func TestDefaultAndValidateConfigManifest(t *testing.T) {
 		error          error
 	}{
 		{
-			name: "Valid MachineConfig",
+			name: "When a valid MachineConfig is provided, it should return the defaulted config",
 			input: []byte(`
 apiVersion: machineconfiguration.openshift.io/v1
 kind: MachineConfig
@@ -1881,7 +1901,7 @@ spec:
 			error: nil,
 		},
 		{
-			name: "When the manifest is not valid it should fail to decode",
+			name: "When the manifest is not valid, it should fail to decode",
 			input: []byte(`
 invalid: yaml
   - content
@@ -1890,7 +1910,7 @@ invalid: yaml
 			error:          fmt.Errorf("error decoding config: Object 'Kind' is missing in '\ninvalid: yaml\n  - content\n'"),
 		},
 		{
-			name: "When the API is not supported config it should fail with unsupported type",
+			name: "When the API is not supported config, it should fail with unsupported type",
 			input: []byte(`
 apiVersion: hypershift.openshift.io/v1beta1
 kind: HostedCluster
@@ -1922,6 +1942,179 @@ spec:
 	}
 }
 
+func TestGetPlatformConfigs(t *testing.T) {
+	ipv4Networking := hyperv1.ClusterNetworking{
+		ClusterNetwork: []hyperv1.ClusterNetworkEntry{{CIDR: *ipnet.MustParseCIDR("10.132.0.0/14")}},
+		ServiceNetwork: []hyperv1.ServiceNetworkEntry{{CIDR: *ipnet.MustParseCIDR("172.31.0.0/16")}},
+	}
+	dualStackNetworking := hyperv1.ClusterNetworking{
+		ClusterNetwork: []hyperv1.ClusterNetworkEntry{
+			{CIDR: *ipnet.MustParseCIDR("10.132.0.0/14")},
+			{CIDR: *ipnet.MustParseCIDR("fd01::/48")},
+		},
+		ServiceNetwork: []hyperv1.ServiceNetworkEntry{
+			{CIDR: *ipnet.MustParseCIDR("172.31.0.0/16")},
+			{CIDR: *ipnet.MustParseCIDR("fd02::/112")},
+		},
+	}
+
+	testCases := []struct {
+		name          string
+		nodePool      *hyperv1.NodePool
+		networking    hyperv1.ClusterNetworking
+		expectConfigs bool
+	}{
+		{
+			// No config may ever be generated for default-network NodePools:
+			// anything emitted here becomes part of the NodePool config hash and
+			// would trigger a fleet-wide rollout when the HyperShift operator is
+			// upgraded.
+			name: "When platform is KubeVirt with default network on a dual-stack cluster it should return no configs to keep the config hash unchanged",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						Type:     hyperv1.KubevirtPlatform,
+						Kubevirt: &hyperv1.KubevirtNodePoolPlatform{
+							// AttachDefaultNetwork defaults to true when nil
+						},
+					},
+				},
+			},
+			networking:    dualStackNetworking,
+			expectConfigs: false,
+		},
+		{
+			name: "When platform is KubeVirt with multus primary network on an IPv4-only cluster it should return no configs to keep the config hash unchanged",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						Type: hyperv1.KubevirtPlatform,
+						Kubevirt: &hyperv1.KubevirtNodePoolPlatform{
+							AttachDefaultNetwork: ptr.To(false),
+							AdditionalNetworks: []hyperv1.KubevirtNetwork{
+								{Name: "ns1/localnet-net"},
+							},
+						},
+					},
+				},
+			},
+			networking:    ipv4Networking,
+			expectConfigs: false,
+		},
+		{
+			name: "When platform is KubeVirt with multus primary network on a dual-stack cluster it should return the override config",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						Type: hyperv1.KubevirtPlatform,
+						Kubevirt: &hyperv1.KubevirtNodePoolPlatform{
+							AttachDefaultNetwork: ptr.To(false),
+							AdditionalNetworks: []hyperv1.KubevirtNetwork{
+								{Name: "ns1/localnet-net"},
+							},
+						},
+					},
+				},
+			},
+			networking:    dualStackNetworking,
+			expectConfigs: true,
+		},
+		{
+			name: "When platform is AWS it should return no configs",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						Type: hyperv1.AWSPlatform,
+					},
+				},
+			},
+			networking:    dualStackNetworking,
+			expectConfigs: false,
+		},
+		{
+			name: "When platform is KubeVirt with nil Kubevirt spec it should return no configs",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						Type: hyperv1.KubevirtPlatform,
+					},
+				},
+			},
+			networking:    dualStackNetworking,
+			expectConfigs: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			cg := &ConfigGenerator{
+				nodePool: tc.nodePool,
+				hostedCluster: &hyperv1.HostedCluster{
+					Spec: hyperv1.HostedClusterSpec{
+						Networking: tc.networking,
+					},
+				},
+			}
+
+			configs, err := cg.getPlatformConfigs()
+			g.Expect(err).ToNot(HaveOccurred())
+
+			if tc.expectConfigs {
+				g.Expect(configs).ToNot(BeNil())
+				g.Expect(configs).To(HaveLen(1))
+				g.Expect(configs[0].Data).To(HaveKey(TokenSecretConfigKey))
+				g.Expect(configs[0].Data[TokenSecretConfigKey]).ToNot(BeEmpty())
+			} else {
+				g.Expect(configs).To(BeNil())
+			}
+		})
+	}
+}
+
+func TestKubevirtPlatformConfig(t *testing.T) {
+	// The generation matrix (multus/default network, IPv4/dual-stack, non-KubeVirt,
+	// nil spec) is covered by network_test.go's TestGenerateNetworkOverrideMachineConfig,
+	// and the ConfigMap wiring is covered by TestGetPlatformConfigs (which calls this
+	// method). This test only asserts the wiring: the HostedCluster networking is passed
+	// through, so a multus NodePool on a dual-stack cluster yields the no-op override.
+	g := NewWithT(t)
+
+	cg := &ConfigGenerator{
+		nodePool: &hyperv1.NodePool{
+			Spec: hyperv1.NodePoolSpec{
+				Platform: hyperv1.NodePoolPlatform{
+					Type: hyperv1.KubevirtPlatform,
+					Kubevirt: &hyperv1.KubevirtNodePoolPlatform{
+						AttachDefaultNetwork: ptr.To(false),
+						AdditionalNetworks: []hyperv1.KubevirtNetwork{
+							{Name: "ns1/localnet-net"},
+						},
+					},
+				},
+			},
+		},
+		hostedCluster: &hyperv1.HostedCluster{
+			Spec: hyperv1.HostedClusterSpec{
+				Networking: hyperv1.ClusterNetworking{
+					ClusterNetwork: []hyperv1.ClusterNetworkEntry{
+						{CIDR: *ipnet.MustParseCIDR("10.132.0.0/14")},
+						{CIDR: *ipnet.MustParseCIDR("fd01::/48")},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := cg.kubevirtPlatformConfig()
+	g.Expect(err).ToNot(HaveOccurred())
+	// The override MachineConfig replacing the MCO-rendered nmstate files is generated.
+	g.Expect(result).To(ContainSubstring("01-kubevirt-network"))
+	g.Expect(result).To(ContainSubstring("001-nmstate-disable-ipv6-autoconf"))
+	g.Expect(result).To(ContainSubstring("002-nmstate-arp-proxy-ipv6-gw"))
+}
+
 func TestGlobalConfigString(t *testing.T) {
 	expectedGlobalConfigStringWhenEmpty := `{"metadata":{"name":"cluster","creationTimestamp":null},"spec":{"trustedCA":{"name":""}},"status":{}}
 {"metadata":{"name":"cluster","creationTimestamp":null},"spec":{"additionalTrustedCA":{"name":""},"registrySources":{}},"status":{}}
@@ -1929,10 +2122,20 @@ func TestGlobalConfigString(t *testing.T) {
 	expectedGlobalConfigStringWithValues := `{"metadata":{"name":"cluster","creationTimestamp":null},"spec":{"httpProxy":"proxy","noProxy":"noProxy","trustedCA":{"name":""}},"status":{"httpProxy":"proxy","noProxy":".cluster.local,.local,.svc,127.0.0.1,localhost,noProxy"}}
 {"metadata":{"name":"cluster","creationTimestamp":null},"spec":{"externalRegistryHostnames":["external registry"],"additionalTrustedCA":{"name":""},"registrySources":{}},"status":{}}
 `
+	expectedGlobalConfigStringWithTLSProfile := `{"metadata":{"name":"cluster","creationTimestamp":null},"spec":{"trustedCA":{"name":""}},"status":{}}
+{"metadata":{"name":"cluster","creationTimestamp":null},"spec":{"additionalTrustedCA":{"name":""},"registrySources":{}},"status":{}}
+null
+`
+
+	expectedGlobalConfigStringWithTLSProfileSet := `{"metadata":{"name":"cluster","creationTimestamp":null},"spec":{"trustedCA":{"name":""}},"status":{}}
+{"metadata":{"name":"cluster","creationTimestamp":null},"spec":{"additionalTrustedCA":{"name":""},"registrySources":{}},"status":{}}
+{"type":"Custom","custom":{"ciphers":["TLS_AES_128_GCM_SHA256"],"minTLSVersion":"VersionTLS13"}}
+`
 
 	testCases := []struct {
 		name           string
 		globalConfig   *hyperv1.ClusterConfiguration
+		releaseImage   *releaseinfo.ReleaseImage
 		expectedOutput string
 	}{
 		// Expected behavior for backward compatibility for empty values is:
@@ -1940,6 +2143,7 @@ func TestGlobalConfigString(t *testing.T) {
 		{
 			name:           "When Empty GlobalConfig it should return serialized string honoring backward compatibility expectation (see code comment)",
 			globalConfig:   &hyperv1.ClusterConfiguration{},
+			releaseImage:   &releaseinfo.ReleaseImage{ImageStream: &imageapi.ImageStream{ObjectMeta: metav1.ObjectMeta{Name: "4.18.0"}}},
 			expectedOutput: expectedGlobalConfigStringWhenEmpty,
 		},
 		{
@@ -1951,6 +2155,7 @@ func TestGlobalConfigString(t *testing.T) {
 				Image:          &configv1.ImageSpec{},
 				Proxy:          &configv1.ProxySpec{},
 			},
+			releaseImage:   &releaseinfo.ReleaseImage{ImageStream: &imageapi.ImageStream{ObjectMeta: metav1.ObjectMeta{Name: "4.18.0"}}},
 			expectedOutput: expectedGlobalConfigStringWhenEmpty,
 		},
 		{
@@ -1973,7 +2178,39 @@ func TestGlobalConfigString(t *testing.T) {
 					TrustedCA:          configv1.ConfigMapNameReference{},
 				},
 			},
+			releaseImage:   &releaseinfo.ReleaseImage{ImageStream: &imageapi.ImageStream{ObjectMeta: metav1.ObjectMeta{Name: "4.18.0"}}},
 			expectedOutput: expectedGlobalConfigStringWithValues,
+		},
+		{
+			name:           "When release image is >= 4.23 with no TLS profile it should include null TLS profile in config string",
+			globalConfig:   &hyperv1.ClusterConfiguration{},
+			releaseImage:   &releaseinfo.ReleaseImage{ImageStream: &imageapi.ImageStream{ObjectMeta: metav1.ObjectMeta{Name: "4.23.0"}}},
+			expectedOutput: expectedGlobalConfigStringWithTLSProfile,
+		},
+		{
+			name: "When release image is >= 4.23 with TLS profile set it should include only TLS profile in config string",
+			globalConfig: &hyperv1.ClusterConfiguration{
+				APIServer: &configv1.APIServerSpec{
+					TLSSecurityProfile: &configv1.TLSSecurityProfile{
+						Type: configv1.TLSProfileCustomType,
+						Custom: &configv1.CustomTLSProfile{
+							TLSProfileSpec: configv1.TLSProfileSpec{
+								Ciphers:       []string{"TLS_AES_128_GCM_SHA256"},
+								MinTLSVersion: configv1.VersionTLS13,
+							},
+						},
+					},
+					Encryption: configv1.APIServerEncryption{Type: configv1.EncryptionTypeAESCBC},
+				},
+			},
+			releaseImage:   &releaseinfo.ReleaseImage{ImageStream: &imageapi.ImageStream{ObjectMeta: metav1.ObjectMeta{Name: "4.23.0"}}},
+			expectedOutput: expectedGlobalConfigStringWithTLSProfileSet,
+		},
+		{
+			name:           "When release image is a 4.23 CI pre-release it should still include TLS profile in config string",
+			globalConfig:   &hyperv1.ClusterConfiguration{},
+			releaseImage:   &releaseinfo.ReleaseImage{ImageStream: &imageapi.ImageStream{ObjectMeta: metav1.ObjectMeta{Name: "4.23.0-0.ci-2026-08-11-110857"}}},
+			expectedOutput: expectedGlobalConfigStringWithTLSProfile,
 		},
 	}
 
@@ -1986,7 +2223,7 @@ func TestGlobalConfigString(t *testing.T) {
 
 		t.Run(tc.name, func(t *testing.T) {
 			g := NewWithT(t)
-			output, err := globalConfigString(hcluster)
+			output, err := globalConfigString(hcluster, tc.releaseImage)
 			g.Expect(err).ToNot(HaveOccurred())
 			if diff := cmp.Diff(output, tc.expectedOutput); diff != "" {
 				t.Errorf("actual config differs from expected: %s", diff)

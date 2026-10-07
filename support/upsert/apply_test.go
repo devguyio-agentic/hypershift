@@ -1,6 +1,11 @@
 package upsert
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,15 +16,217 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 func TestApplyManifest(t *testing.T) {
+	testApplyManifestRejectedWrites(t)
+	testApplyManifestSuccessfulWrites(t)
+	testApplyManifestMetadataWrites(t)
+	testApplyManifestExisting(t)
+}
+
+func testApplyManifestRejectedWrites(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		updateError error
+	}{
+		{
+			name:        "conflicting updates",
+			updateError: apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, "test", fmt.Errorf("conflict")),
+		},
+		{
+			name:        "other rejected updates",
+			updateError: apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, "test", fmt.Errorf("forbidden")),
+		},
+	} {
+		t.Run("When "+testCase.name+" exceed the threshold, it should count only successful writes", func(t *testing.T) {
+			var logs bytes.Buffer
+			detector := newUpdateLoopDetector()
+			detector.log = zap.New(zap.WriteTo(&logs), zap.JSONEncoder())
+			provider := &applyProvider{loopDetector: detector}
+			client := &updateResultClient{
+				Client:            fake.NewClientBuilder().WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "test"}}).Build(),
+				remainingFailures: updateLoopThreshold(&corev1.ConfigMap{}) + 2,
+				updateError:       testCase.updateError,
+			}
+			manifest := func(value string) *corev1.ConfigMap {
+				return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "test"}, Data: map[string]string{"value": value}}
+			}
+			key := crclient.ObjectKey{Name: "test"}
+			cacheKey := detector.keyFor(manifest("changed"), key)
+
+			for attempt := 0; attempt < updateLoopThreshold(manifest("changed"))+2; attempt++ {
+				result, err := provider.ApplyManifest(t.Context(), client, manifest("changed"))
+				if result != controllerutil.OperationResultNone || !errors.Is(err, testCase.updateError) {
+					t.Fatalf("rejected update %d: got result %q, error %v", attempt, result, err)
+				}
+			}
+			if count := detector.updateEventCount[cacheKey]; count != 0 {
+				t.Errorf("rejected updates counted as writes: %d", count)
+			}
+			if logs.Len() != 0 {
+				t.Errorf("rejected updates logged a warning: %s", logs.String())
+			}
+
+			result, err := provider.ApplyManifest(t.Context(), client, manifest("changed"))
+			if err != nil || result != controllerutil.OperationResultUpdated {
+				t.Fatalf("successful update: got result %q, error %v", result, err)
+			}
+			if count := detector.updateEventCount[cacheKey]; count != 1 {
+				t.Errorf("expected one successful write, got %d", count)
+			}
+			result, err = provider.ApplyManifest(t.Context(), client, manifest("changed"))
+			if err != nil || result != controllerutil.OperationResultNone {
+				t.Fatalf("no-op update: got result %q, error %v", result, err)
+			}
+			if !detector.hasNoOpUpdate.Has(cacheKey) {
+				t.Error("no-op did not mark the object as settled")
+			}
+			result, err = provider.ApplyManifest(t.Context(), client, manifest("changed-again"))
+			if err != nil || result != controllerutil.OperationResultUpdated {
+				t.Fatalf("update after no-op: got result %q, error %v", result, err)
+			}
+			if count := detector.updateEventCount[cacheKey]; count != 1 {
+				t.Errorf("update after no-op changed the count to %d", count)
+			}
+			if logs.Len() != 0 {
+				t.Errorf("unexpected warning after a no-op: %s", logs.String())
+			}
+		})
+	}
+}
+
+func testApplyManifestSuccessfulWrites(t *testing.T) {
+	t.Run("When successful writes reach the threshold, it should log the requested change", func(t *testing.T) {
+		var logs bytes.Buffer
+		detector := newUpdateLoopDetector()
+		detector.log = zap.New(zap.WriteTo(&logs), zap.JSONEncoder())
+		provider := &applyProvider{loopDetector: detector}
+		client := &updateResultClient{
+			Client:            fake.NewClientBuilder().WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "test"}}).Build(),
+			mutateAfterUpdate: true,
+		}
+		key := crclient.ObjectKey{Name: "test"}
+		cacheKey := detector.keyFor(&corev1.ConfigMap{}, key)
+
+		for attempt := 1; attempt <= updateLoopThreshold(&corev1.ConfigMap{}); attempt++ {
+			manifest := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "test"},
+				Data:       map[string]string{"value": fmt.Sprintf("value-%d", attempt)},
+			}
+			result, err := provider.ApplyManifest(t.Context(), client, manifest)
+			if err != nil || result != controllerutil.OperationResultUpdated {
+				t.Fatalf("update %d: got result %q, error %v", attempt, result, err)
+			}
+			if count := detector.updateEventCount[cacheKey]; count != attempt {
+				t.Errorf("update %d: expected count %d, got %d", attempt, attempt, count)
+			}
+			if attempt < updateLoopThreshold(manifest) && logs.Len() != 0 {
+				t.Fatalf("warning before threshold: %s", logs.String())
+			}
+		}
+
+		var warning struct {
+			Message     string `json:"msg"`
+			Diff        string `json:"diff"`
+			UpdateCount int    `json:"updateCount"`
+		}
+		if err := json.Unmarshal(logs.Bytes(), &warning); err != nil {
+			t.Fatalf("decode warning: %v; log: %s", err, logs.String())
+		}
+		if warning.Message != LoopDetectorWarningMessage || warning.UpdateCount != updateLoopThreshold(&corev1.ConfigMap{}) {
+			t.Errorf("unexpected warning: %+v", warning)
+		}
+		if !strings.Contains(warning.Diff, "value-9") || !strings.Contains(warning.Diff, "value-10") || strings.Contains(warning.Diff, "api-side-mutation") {
+			t.Errorf("warning diff does not describe the requested change: %s", warning.Diff)
+		}
+	})
+}
+
+func testApplyManifestMetadataWrites(t *testing.T) {
+	for _, testCase := range []struct {
+		name          string
+		initial       *corev1.ConfigMap
+		manifest      func(int) *corev1.ConfigMap
+		previousValue string
+		currentValue  string
+	}{
+		{
+			name: "annotation changes",
+			initial: &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+				Name: "test", Annotations: map[string]string{"requested-metadata": "annotation-0"},
+			}},
+			manifest: func(attempt int) *corev1.ConfigMap {
+				return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+					Name: "test", Annotations: map[string]string{"requested-metadata": fmt.Sprintf("annotation-%d", attempt)},
+				}}
+			},
+			previousValue: "annotation-9",
+			currentValue:  "annotation-10",
+		},
+		{
+			name: "label removal",
+			initial: &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+				Name: "test", Labels: map[string]string{"requested-metadata": "label-0"},
+			}},
+			manifest: func(attempt int) *corev1.ConfigMap {
+				value := fmt.Sprintf("label-%d", attempt)
+				if attempt == updateLoopThreshold(&corev1.ConfigMap{}) {
+					value = netutil.RemoveLabelMarker
+				}
+				return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+					Name: "test", Labels: map[string]string{"requested-metadata": value},
+				}}
+			},
+			previousValue: "label-9",
+		},
+	} {
+		t.Run("When metadata-only "+testCase.name+" reach the threshold, it should log the original metadata change", func(t *testing.T) {
+			var logs bytes.Buffer
+			detector := newUpdateLoopDetector()
+			detector.log = zap.New(zap.WriteTo(&logs), zap.JSONEncoder())
+			provider := &applyProvider{loopDetector: detector}
+			client := fake.NewClientBuilder().WithObjects(testCase.initial).Build()
+			cacheKey := detector.keyFor(testCase.initial, crclient.ObjectKey{Name: "test"})
+
+			for attempt := 1; attempt <= updateLoopThreshold(testCase.initial); attempt++ {
+				result, err := provider.ApplyManifest(t.Context(), client, testCase.manifest(attempt))
+				if err != nil || result != controllerutil.OperationResultUpdated {
+					t.Fatalf("update %d: got result %q, error %v", attempt, result, err)
+				}
+				if attempt < updateLoopThreshold(testCase.initial) && logs.Len() != 0 {
+					t.Fatalf("warning before threshold: %s", logs.String())
+				}
+			}
+			if count := detector.updateEventCount[cacheKey]; count != updateLoopThreshold(testCase.initial) {
+				t.Errorf("expected %d successful writes, got %d", updateLoopThreshold(testCase.initial), count)
+			}
+			var warning struct {
+				Message string `json:"msg"`
+				Diff    string `json:"diff"`
+			}
+			if err := json.Unmarshal(logs.Bytes(), &warning); err != nil {
+				t.Fatalf("decode warning: %v; log: %s", err, logs.String())
+			}
+			if warning.Message != LoopDetectorWarningMessage || !strings.Contains(warning.Diff, testCase.previousValue) ||
+				(testCase.currentValue != "" && !strings.Contains(warning.Diff, testCase.currentValue)) {
+				t.Errorf("warning diff does not describe the metadata change: %s", warning.Diff)
+			}
+		})
+	}
+}
+
+func testApplyManifestExisting(t *testing.T) {
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-dep",
@@ -57,6 +264,13 @@ func TestApplyManifest(t *testing.T) {
 	existingDeployment.Finalizers = []string{"test-finalizer"}
 	existingDeployment.Labels["existing-label"] = "test"
 	existingDeployment.Annotations["existing-annotation"] = "test"
+
+	// Stamp the hash on the existing object so the hash comparison is a no-op.
+	hash := computeDesiredHash(deployment)
+	if existingDeployment.Annotations == nil {
+		existingDeployment.Annotations = make(map[string]string)
+	}
+	existingDeployment.Annotations[DesiredStateHashAnnotation] = hash
 
 	// make sure unset spec fields are ignored.
 	existingDeployment.Spec.ProgressDeadlineSeconds = ptr.To[int32](600)
@@ -320,5 +534,294 @@ func TestApplyManifestLabelRemovalOnCreate(t *testing.T) {
 	// Verify that only one label remains
 	if len(createdRoute.Labels) != 1 {
 		t.Errorf("expected 1 label remaining, got %d: %v", len(createdRoute.Labels), createdRoute.Labels)
+	}
+}
+
+func makeHashTestDeployment(args ...string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dep",
+			Namespace: "test-ns",
+		},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:    "main",
+						Image:   "registry.example.com/image:latest",
+						Command: []string{"/usr/bin/server"},
+						Args:    args,
+					}},
+				},
+			},
+		},
+	}
+}
+
+func TestApplyManifest_DesiredStateHash(t *testing.T) {
+	t.Run("create stamps the hash annotation", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo", "--bar", "--baz")
+		client := fake.NewClientBuilder().Build()
+		result, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep)
+		if err != nil {
+			t.Fatalf("ApplyManifest failed: %v", err)
+		}
+		if result != controllerutil.OperationResultCreated {
+			t.Fatalf("expected Created, got %s", result)
+		}
+
+		var created appsv1.Deployment
+		if err := client.Get(t.Context(), types.NamespacedName{Name: "test-dep", Namespace: "test-ns"}, &created); err != nil {
+			t.Fatalf("get failed: %v", err)
+		}
+		hash := created.Annotations[DesiredStateHashAnnotation]
+		if len(hash) != 64 {
+			t.Fatalf("expected 64-char hash, got %q (len=%d)", hash, len(hash))
+		}
+	})
+
+	t.Run("trailing slice removal detected", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo", "--bar", "--baz")
+		client := fake.NewClientBuilder().Build()
+		// Create
+		if _, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep); err != nil {
+			t.Fatal(err)
+		}
+
+		// Remove --baz
+		dep2 := makeHashTestDeployment("--foo", "--bar")
+		result, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep2)
+		if err != nil {
+			t.Fatalf("ApplyManifest failed: %v", err)
+		}
+		if result != controllerutil.OperationResultUpdated {
+			t.Errorf("expected Updated (trailing arg removed), got %s", result)
+		}
+	})
+
+	t.Run("nil args detected", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo", "--bar")
+		client := fake.NewClientBuilder().Build()
+		if _, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep); err != nil {
+			t.Fatal(err)
+		}
+
+		// Set args to nil
+		dep2 := makeHashTestDeployment()
+		result, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep2)
+		if err != nil {
+			t.Fatalf("ApplyManifest failed: %v", err)
+		}
+		if result != controllerutil.OperationResultUpdated {
+			t.Errorf("expected Updated (args nil'd), got %s", result)
+		}
+	})
+
+	t.Run("idempotent on identical state", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo", "--bar")
+		client := fake.NewClientBuilder().Build()
+		if _, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep); err != nil {
+			t.Fatal(err)
+		}
+
+		dep2 := makeHashTestDeployment("--foo", "--bar")
+		result, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep2)
+		if err != nil {
+			t.Fatalf("ApplyManifest failed: %v", err)
+		}
+		if result != controllerutil.OperationResultNone {
+			t.Errorf("expected None (idempotent), got %s", result)
+		}
+	})
+
+	t.Run("deterministic hash", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo", "--bar", "--baz")
+		h1 := computeDesiredHash(dep)
+		h2 := computeDesiredHash(dep)
+		if h1 != h2 {
+			t.Errorf("hash is not deterministic: %s != %s", h1, h2)
+		}
+		if len(h1) != 64 {
+			t.Errorf("expected 64-char hex hash, got len=%d: %s", len(h1), h1)
+		}
+	})
+}
+
+func TestApplyManifest_DesiredStateHashEdgeCases(t *testing.T) {
+	t.Run("external drift detected via DeepDerivative fallback despite matching hash", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo", "--bar")
+		client := fake.NewClientBuilder().Build()
+
+		// Create - stamps the hash based on dep's desired spec.
+		if _, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep); err != nil {
+			t.Fatal(err)
+		}
+
+		// Simulate an external modification to the live object's spec (e.g. someone
+		// running `kubectl edit`, or an unrelated controller), without touching the
+		// hash annotation our controller stamped on create.
+		var drifted appsv1.Deployment
+		if err := client.Get(t.Context(), types.NamespacedName{Name: "test-dep", Namespace: "test-ns"}, &drifted); err != nil {
+			t.Fatal(err)
+		}
+		drifted.Spec.Template.Spec.Containers[0].Image = "someone-else/hijacked:latest"
+		if err := client.Update(t.Context(), &drifted); err != nil {
+			t.Fatal(err)
+		}
+
+		// Reconcile again with the exact same desired manifest as before, so the
+		// hash comparison alone would say "no update needed". The DeepDerivative
+		// fallback must still catch the drift and force an update.
+		dep2 := makeHashTestDeployment("--foo", "--bar")
+		result, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep2)
+		if err != nil {
+			t.Fatalf("ApplyManifest failed: %v", err)
+		}
+		if result != controllerutil.OperationResultUpdated {
+			t.Errorf("expected Updated (external drift detected via DeepDerivative fallback), got %s", result)
+		}
+
+		// Verify the drift was actually corrected.
+		var reconciled appsv1.Deployment
+		if err := client.Get(t.Context(), types.NamespacedName{Name: "test-dep", Namespace: "test-ns"}, &reconciled); err != nil {
+			t.Fatal(err)
+		}
+		if reconciled.Spec.Template.Spec.Containers[0].Image != "registry.example.com/image:latest" {
+			t.Errorf("expected drifted image to be corrected, got %q", reconciled.Spec.Template.Spec.Containers[0].Image)
+		}
+	})
+
+	t.Run("migration force-stamps hash on pre-existing object", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo")
+		// Pre-existing object without hash annotation
+		existing := dep.DeepCopy()
+		existing.ResourceVersion = "1"
+		client := fake.NewClientBuilder().WithObjects(existing).Build()
+
+		dep2 := makeHashTestDeployment("--foo")
+		result, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep2)
+		if err != nil {
+			t.Fatalf("ApplyManifest failed: %v", err)
+		}
+		if result != controllerutil.OperationResultUpdated {
+			t.Errorf("expected Updated (migration stamp), got %s", result)
+		}
+
+		// Verify hash was stamped
+		var updated appsv1.Deployment
+		if err := client.Get(t.Context(), types.NamespacedName{Name: "test-dep", Namespace: "test-ns"}, &updated); err != nil {
+			t.Fatal(err)
+		}
+		if updated.Annotations[DesiredStateHashAnnotation] == "" {
+			t.Error("expected hash annotation after migration, got empty")
+		}
+	})
+
+	t.Run("second reconcile after migration is no-op", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo")
+		existing := dep.DeepCopy()
+		existing.ResourceVersion = "1"
+		client := fake.NewClientBuilder().WithObjects(existing).Build()
+
+		// First reconcile: migration stamp
+		dep2 := makeHashTestDeployment("--foo")
+		if _, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep2); err != nil {
+			t.Fatal(err)
+		}
+
+		// Second reconcile: should be no-op
+		dep3 := makeHashTestDeployment("--foo")
+		result, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep3)
+		if err != nil {
+			t.Fatalf("ApplyManifest failed: %v", err)
+		}
+		if result != controllerutil.OperationResultNone {
+			t.Errorf("expected None (post-migration no-op), got %s", result)
+		}
+	})
+
+	t.Run("loop detector compatible", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo")
+		client := fake.NewClientBuilder().Build()
+		provider := &applyProvider{loopDetector: newUpdateLoopDetector()}
+
+		// Create
+		if _, err := provider.ApplyManifest(t.Context(), client, dep); err != nil {
+			t.Fatal(err)
+		}
+
+		// 3 identical reconciles
+		for i := 0; i < 3; i++ {
+			d := makeHashTestDeployment("--foo")
+			if _, err := provider.ApplyManifest(t.Context(), client, d); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if err := provider.ValidateUpdateEvents(1); err != nil {
+			t.Errorf("loop detector fired on stable reconciles: %v", err)
+		}
+	})
+}
+
+func TestToUnstructured(t *testing.T) {
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test",
+			Namespace:       "ns",
+			UID:             types.UID("test-uid"),
+			Generation:      5,
+			ResourceVersion: "42",
+			ManagedFields: []metav1.ManagedFieldsEntry{
+				{Manager: "test"},
+			},
+			Annotations: map[string]string{
+				DesiredStateHashAnnotation: "abc123",
+				"other-annotation":         "keep",
+			},
+			Labels: map[string]string{
+				"app": "test",
+			},
+		},
+		Status: appsv1.DeploymentStatus{Replicas: 3},
+	}
+
+	u, err := toUnstructured(dep)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	metadata := u["metadata"].(map[string]any)
+
+	// Volatile fields should be stripped
+	for _, field := range []string{"uid", "generation", "creationTimestamp", "resourceVersion", "managedFields"} {
+		if _, ok := metadata[field]; ok {
+			t.Errorf("expected %s to be stripped, but it's present", field)
+		}
+	}
+
+	// Status should be stripped
+	if _, ok := u["status"]; ok {
+		t.Error("expected status to be stripped")
+	}
+
+	// Hash annotation should be stripped
+	annotations := metadata["annotations"].(map[string]any)
+	if _, ok := annotations[DesiredStateHashAnnotation]; ok {
+		t.Error("expected hash annotation to be stripped")
+	}
+
+	// Other annotations and labels should be preserved
+	if annotations["other-annotation"] != "keep" {
+		t.Error("expected other-annotation to be preserved")
+	}
+	labels := metadata["labels"].(map[string]any)
+	if labels["app"] != "test" {
+		t.Error("expected app label to be preserved")
+	}
+
+	// Name should be preserved
+	if metadata["name"] != "test" {
+		t.Error("expected name to be preserved")
 	}
 }

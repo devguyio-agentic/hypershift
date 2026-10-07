@@ -11,6 +11,7 @@ import (
 	schedulingv1alpha1 "github.com/openshift/hypershift/api/scheduling/v1alpha1"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/hostedcluster"
 	schedulerutil "github.com/openshift/hypershift/hypershift-operator/controllers/scheduler/util"
+	pkgscheduler "github.com/openshift/hypershift/pkg/scheduler"
 	hyperapi "github.com/openshift/hypershift/support/api"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -58,20 +59,20 @@ func TestNodeReaper(t *testing.T) {
 		expectDelete bool
 	}{
 		{
-			name: "no associated cluster",
+			name: "When there is no associated cluster it should not delete the node",
 			existing: []client.Object{
 				node(),
 			},
 		},
 		{
-			name: "associated existing cluster",
+			name: "When associated cluster exists it should not delete the node",
 			existing: []client.Object{
 				node(withCluster("c1")),
 				cluster("c1"),
 			},
 		},
 		{
-			name: "associated with non-existent cluster",
+			name: "When associated with a non-existent cluster it should delete the node",
 			existing: []client.Object{
 				node(withCluster("c1")),
 			},
@@ -134,9 +135,9 @@ func TestHostedClusterScheduler(t *testing.T) {
 		n := &corev1.Node{}
 		n.Name = name
 		n.Labels = map[string]string{
-			OSDFleetManagerPairedNodesLabel:      OSDFleetManagerPairedNodesID,
-			hyperv1.RequestServingComponentLabel: "true",
-			"topology.kubernetes.io/zone":        zone,
+			pkgscheduler.OSDFleetManagerPairedNodesLabel: OSDFleetManagerPairedNodesID,
+			hyperv1.RequestServingComponentLabel:         "true",
+			"topology.kubernetes.io/zone":                zone,
 		}
 		for _, m := range mods {
 			m(n)
@@ -174,11 +175,11 @@ func TestHostedClusterScheduler(t *testing.T) {
 		expectedPairLabel     string
 	}{
 		{
-			name: "deleted hosted cluster",
+			name: "When hosted cluster is deleted it should succeed without error",
 			hc:   hostedcluster(deletedHC),
 		},
 		{
-			name: "scheduled hosted cluster with 2 existing Nodes",
+			name: "When scheduled hosted cluster has 2 existing nodes it should succeed",
 			hc:   hostedcluster(scheduledHC),
 			nodes: nodes(
 				node("n1", "zone-a", "id1", withCluster(hostedcluster())),
@@ -186,7 +187,7 @@ func TestHostedClusterScheduler(t *testing.T) {
 			),
 		},
 		{
-			name: "available nodes",
+			name: "When available nodes exist it should schedule them",
 			hc:   hostedcluster(),
 			nodes: nodes(
 				node("n1", "zone-a", "id1"),
@@ -198,7 +199,7 @@ func TestHostedClusterScheduler(t *testing.T) {
 			expectedPairLabel:     "id1",
 		},
 		{
-			name: "available node, existing assigned node",
+			name: "When an available node and existing assigned node are present it should schedule",
 			hc:   hostedcluster(),
 			nodes: nodes(
 				node("n1", "zone-a", "id1", withCluster(hostedcluster())),
@@ -208,7 +209,7 @@ func TestHostedClusterScheduler(t *testing.T) {
 			expectedPairLabel:     "id1",
 		},
 		{
-			name: "When there's no paired Nodes in different AZs it should fail",
+			name: "When there's no paired Nodes in different AZs, it should fail",
 			hc:   hostedcluster(),
 			nodes: nodes(
 				node("n1", "zone-a", "id1"),
@@ -219,7 +220,7 @@ func TestHostedClusterScheduler(t *testing.T) {
 			expectedPairLabel: "id1",
 		},
 		{
-			name: "When all Nodes are already labeled with other HC it should fail",
+			name: "When all Nodes are already labeled with other HC, it should fail",
 			hc:   hostedcluster(),
 			nodes: nodes(
 				node("n1", "zone-a", "id1", withCluster(hostedcluster(hcName("other")))),
@@ -237,7 +238,7 @@ func TestHostedClusterScheduler(t *testing.T) {
 			expectedPairLabel:     "id1",
 		},
 		{
-			name: "When HostedCluster is scheduled, without 2 existing Nodes and there's no Nodes available it should fail",
+			name: "When HostedCluster is scheduled, without 2 existing Nodes and there's no Nodes available, it should fail",
 			hc:   hostedcluster(scheduledHC),
 			nodes: nodes(
 				node("n1", "zone-a", "id1", withCluster(hostedcluster())),
@@ -268,7 +269,7 @@ func TestHostedClusterScheduler(t *testing.T) {
 				g.Expect(err).ToNot(HaveOccurred())
 				g.Expect(actual.Annotations).To(HaveKey(hyperv1.HostedClusterScheduledAnnotation))
 				g.Expect(actual.Annotations[hyperv1.AWSLoadBalancerTargetNodesAnnotation]).
-					To(Equal(OSDFleetManagerPairedNodesLabel + "=" + test.expectedPairLabel))
+					To(Equal(pkgscheduler.OSDFleetManagerPairedNodesLabel + "=" + test.expectedPairLabel))
 			}
 			if test.checkScheduledNodes {
 				hc := hostedcluster()
@@ -291,7 +292,7 @@ func TestHostedClusterScheduler(t *testing.T) {
 				}
 				g.Expect(scheduledNodeIndices).To(HaveLen(2))
 				g.Expect(nodeZone(&nodeList.Items[scheduledNodeIndices[0]])).ToNot(Equal(nodeZone(&nodeList.Items[scheduledNodeIndices[1]])))
-				g.Expect(nodeList.Items[scheduledNodeIndices[0]].Labels[OSDFleetManagerPairedNodesLabel]).To(Equal(nodeList.Items[scheduledNodeIndices[1]].Labels[OSDFleetManagerPairedNodesLabel]))
+				g.Expect(nodeList.Items[scheduledNodeIndices[0]].Labels[pkgscheduler.OSDFleetManagerPairedNodesLabel]).To(Equal(nodeList.Items[scheduledNodeIndices[1]].Labels[pkgscheduler.OSDFleetManagerPairedNodesLabel]))
 			}
 		})
 	}
@@ -390,10 +391,10 @@ func TestHostedClusterSchedulerAndSizer(t *testing.T) {
 		n := &corev1.Node{}
 		n.Name = name
 		n.Labels = map[string]string{
-			OSDFleetManagerPairedNodesLabel:      OSDFleetManagerPairedNodesID,
-			hyperv1.RequestServingComponentLabel: "true",
-			"topology.kubernetes.io/zone":        zone,
-			hyperv1.NodeSizeLabel:                sizeLabel,
+			pkgscheduler.OSDFleetManagerPairedNodesLabel: OSDFleetManagerPairedNodesID,
+			hyperv1.RequestServingComponentLabel:         "true",
+			"topology.kubernetes.io/zone":                zone,
+			hyperv1.NodeSizeLabel:                        sizeLabel,
 		}
 		for _, m := range mods {
 			m(n)
@@ -558,7 +559,7 @@ func TestHostedClusterSchedulerAndSizer(t *testing.T) {
 	}{
 
 		{
-			name: "scheduled hosted cluster with 2 existing Nodes",
+			name: "When scheduled hosted cluster has 2 existing nodes it should keep them scheduled",
 			hc:   hostedcluster(scheduledHC),
 			nodes: nodes(
 				node("n1", "zone-a", "small", "id1", withCluster(hostedcluster())),
@@ -593,7 +594,7 @@ func TestHostedClusterSchedulerAndSizer(t *testing.T) {
 			expectPlaceholder: true,
 		},
 		{
-			name: "ensure allocated cluster node is labeled for cluster",
+			name: "When an allocated cluster node exists it should be labeled for the cluster",
 			hc:   hostedcluster(),
 			nodes: nodes(
 				node("n1", "zone-a", "small", "id1", withCluster(hostedcluster())),
@@ -602,7 +603,7 @@ func TestHostedClusterSchedulerAndSizer(t *testing.T) {
 			checkScheduledNodes: true,
 		},
 		{
-			name: "ensure hosted cluster is annotated properly when nodes are scheduled",
+			name: "When nodes are scheduled it should annotate the hosted cluster properly",
 			hc:   hostedcluster(),
 			nodes: nodes(
 				node("n1", "zone-a", "small", "id1", withCluster(hostedcluster())),
@@ -612,12 +613,12 @@ func TestHostedClusterSchedulerAndSizer(t *testing.T) {
 			checkScheduledNodes:   true,
 		},
 		{
-			name:              "expect placeholder deployment when no nodes are available",
+			name:              "When no nodes are available it should create a placeholder deployment",
 			hc:                hostedcluster(withSize("medium")),
 			expectPlaceholder: true,
 		},
 		{
-			name: "expect placeholder deployment when only one node is available",
+			name: "When only one node is available it should create a placeholder deployment",
 			hc:   hostedcluster(withSize("medium")),
 			nodes: nodes(
 				node("n1", "zone-a", "small", "id1", withCluster(hostedcluster())),
@@ -625,13 +626,13 @@ func TestHostedClusterSchedulerAndSizer(t *testing.T) {
 			expectPlaceholder: true,
 		},
 		{
-			name:                "use existing placeholders for small cluster",
+			name:                "When existing placeholders are available for a small cluster it should use them",
 			hc:                  hostedcluster(),
 			additionalObjects:   placeholderResources(3),
 			checkScheduledNodes: true,
 		},
 		{
-			name: "expect placeholder deployment when not the right size",
+			name: "When nodes are not the right size it should create a placeholder deployment",
 			hc:   hostedcluster(scheduledHC, withSize("medium")),
 			nodes: nodes(
 				node("n1", "zone-a", "small", "id1", withCluster(hostedcluster())),
@@ -640,7 +641,7 @@ func TestHostedClusterSchedulerAndSizer(t *testing.T) {
 			expectPlaceholder: true,
 		},
 		{
-			name: "label nodes when placeholder deployment is ready",
+			name: "When placeholder deployment is ready it should label the nodes",
 			hc:   hostedcluster(withSize("medium")),
 			additionalObjects: provisionedDeployment(placeholderDeployment(hostedcluster()), "medium", []corev1.Node{
 				*(node("n1", "zone-a", "medium", "pair1")),
@@ -705,7 +706,7 @@ func TestHostedClusterSchedulerAndSizer(t *testing.T) {
 				}
 				g.Expect(scheduledNodeIndices).To(HaveLen(2))
 				g.Expect(nodeZone(&nodeList.Items[scheduledNodeIndices[0]])).ToNot(Equal(nodeZone(&nodeList.Items[scheduledNodeIndices[1]])))
-				g.Expect(nodeList.Items[scheduledNodeIndices[0]].Labels[OSDFleetManagerPairedNodesLabel]).To(Equal(nodeList.Items[scheduledNodeIndices[1]].Labels[OSDFleetManagerPairedNodesLabel]))
+				g.Expect(nodeList.Items[scheduledNodeIndices[0]].Labels[pkgscheduler.OSDFleetManagerPairedNodesLabel]).To(Equal(nodeList.Items[scheduledNodeIndices[1]].Labels[pkgscheduler.OSDFleetManagerPairedNodesLabel]))
 			}
 			if test.expectPlaceholder {
 				deployment := placeholderDeployment(test.hc)
@@ -722,8 +723,8 @@ func TestTakenNodePairLabels(t *testing.T) {
 		n := &corev1.Node{}
 		n.Name = name
 		n.Labels = map[string]string{
-			OSDFleetManagerPairedNodesLabel: fleetManagerLabel,
-			hyperv1.HostedClusterLabel:      "cluster",
+			pkgscheduler.OSDFleetManagerPairedNodesLabel: fleetManagerLabel,
+			hyperv1.HostedClusterLabel:                   "cluster",
 		}
 		return n
 	}
@@ -761,7 +762,7 @@ func TestFilterNodeEvents(t *testing.T) {
 		expected      []reconcile.Request
 	}{
 		{
-			name:          "Incoming node is not a request serving node",
+			name:          "When incoming node is not a request serving node, it should return nil",
 			baselineNodes: []client.Object{},
 			incomingNode: &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
@@ -772,17 +773,17 @@ func TestFilterNodeEvents(t *testing.T) {
 			expected: nil,
 		},
 		{
-			name:          "Incoming node is already a dedicated request serving node",
+			name:          "When incoming node is already a dedicated request serving node, it should return its cluster request",
 			baselineNodes: []client.Object{},
 			incomingNode: &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "node-1",
 					Labels: map[string]string{
-						hyperv1.RequestServingComponentLabel: "true",
-						OSDFleetManagerPairedNodesLabel:      "serving-1",
-						hyperv1.HostedClusterLabel:           "namespace-cluster",
-						HostedClusterNameLabel:               "cluster",
-						HostedClusterNamespaceLabel:          "namespace",
+						hyperv1.RequestServingComponentLabel:         "true",
+						pkgscheduler.OSDFleetManagerPairedNodesLabel: "serving-1",
+						hyperv1.HostedClusterLabel:                   "namespace-cluster",
+						HostedClusterNameLabel:                       "cluster",
+						HostedClusterNamespaceLabel:                  "namespace",
 					},
 				},
 			},
@@ -796,17 +797,17 @@ func TestFilterNodeEvents(t *testing.T) {
 			},
 		},
 		{
-			name: "Incoming node is a request serving node, no hostedcluster label, no matching pair",
+			name: "When incoming node is a request serving node with no hostedcluster label and no matching pair, it should return nil",
 			baselineNodes: []client.Object{
 				&corev1.Node{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node-1",
 						Labels: map[string]string{
-							hyperv1.RequestServingComponentLabel: "true",
-							OSDFleetManagerPairedNodesLabel:      "serving-1",
-							hyperv1.HostedClusterLabel:           "namespace-cluster",
-							HostedClusterNameLabel:               "cluster",
-							HostedClusterNamespaceLabel:          "namespace",
+							hyperv1.RequestServingComponentLabel:         "true",
+							pkgscheduler.OSDFleetManagerPairedNodesLabel: "serving-1",
+							hyperv1.HostedClusterLabel:                   "namespace-cluster",
+							HostedClusterNameLabel:                       "cluster",
+							HostedClusterNamespaceLabel:                  "namespace",
 						},
 					},
 				},
@@ -815,25 +816,25 @@ func TestFilterNodeEvents(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "node-2",
 					Labels: map[string]string{
-						hyperv1.RequestServingComponentLabel: "true",
-						OSDFleetManagerPairedNodesLabel:      "serving-2",
+						hyperv1.RequestServingComponentLabel:         "true",
+						pkgscheduler.OSDFleetManagerPairedNodesLabel: "serving-2",
 					},
 				},
 			},
 			expected: nil,
 		},
 		{
-			name: "Incoming node is a request serving node, no hostedcluster label, but existing pair with hostedcluster",
+			name: "When incoming node has no hostedcluster label but existing pair has one, it should return the paired cluster request",
 			baselineNodes: []client.Object{
 				&corev1.Node{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node-1",
 						Labels: map[string]string{
-							hyperv1.RequestServingComponentLabel: "true",
-							OSDFleetManagerPairedNodesLabel:      "serving-1",
-							hyperv1.HostedClusterLabel:           "namespace-cluster",
-							HostedClusterNameLabel:               "cluster",
-							HostedClusterNamespaceLabel:          "namespace",
+							hyperv1.RequestServingComponentLabel:         "true",
+							pkgscheduler.OSDFleetManagerPairedNodesLabel: "serving-1",
+							hyperv1.HostedClusterLabel:                   "namespace-cluster",
+							HostedClusterNameLabel:                       "cluster",
+							HostedClusterNamespaceLabel:                  "namespace",
 						},
 					},
 				},
@@ -842,8 +843,8 @@ func TestFilterNodeEvents(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "node-2",
 					Labels: map[string]string{
-						hyperv1.RequestServingComponentLabel: "true",
-						OSDFleetManagerPairedNodesLabel:      "serving-1",
+						hyperv1.RequestServingComponentLabel:         "true",
+						pkgscheduler.OSDFleetManagerPairedNodesLabel: "serving-1",
 					},
 				},
 			},
@@ -882,7 +883,7 @@ func TestIsNodePairedWith(t *testing.T) {
 			candidate: &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						OSDFleetManagerPairedNodesLabel: "pair-a",
+						pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-a",
 					},
 				},
 			},
@@ -894,7 +895,7 @@ func TestIsNodePairedWith(t *testing.T) {
 			candidate: &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						OSDFleetManagerPairedNodesLabel: "pair-a",
+						pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-a",
 					},
 				},
 			},
@@ -902,7 +903,7 @@ func TestIsNodePairedWith(t *testing.T) {
 				"zone-x": {
 					ObjectMeta: metav1.ObjectMeta{
 						Labels: map[string]string{
-							OSDFleetManagerPairedNodesLabel: "pair-a",
+							pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-a",
 						},
 					},
 				},
@@ -914,7 +915,7 @@ func TestIsNodePairedWith(t *testing.T) {
 			candidate: &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						OSDFleetManagerPairedNodesLabel: "pair-b",
+						pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-b",
 					},
 				},
 			},
@@ -922,7 +923,7 @@ func TestIsNodePairedWith(t *testing.T) {
 				"zone-x": {
 					ObjectMeta: metav1.ObjectMeta{
 						Labels: map[string]string{
-							OSDFleetManagerPairedNodesLabel: "pair-a",
+							pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-a",
 						},
 					},
 				},
@@ -934,7 +935,7 @@ func TestIsNodePairedWith(t *testing.T) {
 			candidate: &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						OSDFleetManagerPairedNodesLabel: "pair-b",
+						pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-b",
 					},
 				},
 			},
@@ -942,14 +943,14 @@ func TestIsNodePairedWith(t *testing.T) {
 				"zone-x": {
 					ObjectMeta: metav1.ObjectMeta{
 						Labels: map[string]string{
-							OSDFleetManagerPairedNodesLabel: "pair-a",
+							pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-a",
 						},
 					},
 				},
 				"zone-y": {
 					ObjectMeta: metav1.ObjectMeta{
 						Labels: map[string]string{
-							OSDFleetManagerPairedNodesLabel: "pair-b",
+							pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-b",
 						},
 					},
 				},
@@ -1066,8 +1067,8 @@ func TestResolvePairLabelFromNodes(t *testing.T) {
 		{
 			name: "When the first node has a pair label, it should return that label",
 			nodes: []corev1.Node{
-				{ObjectMeta: metav1.ObjectMeta{Name: "n1", Labels: map[string]string{OSDFleetManagerPairedNodesLabel: "pair-x"}}},
-				{ObjectMeta: metav1.ObjectMeta{Name: "n2", Labels: map[string]string{OSDFleetManagerPairedNodesLabel: "pair-x"}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "n1", Labels: map[string]string{pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-x"}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "n2", Labels: map[string]string{pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-x"}}},
 			},
 			expected: "pair-x",
 		},
@@ -1247,8 +1248,8 @@ func TestFindAvailableNodes(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Name: "n2",
 							Labels: map[string]string{
-								"topology.kubernetes.io/zone":   "zone-b",
-								OSDFleetManagerPairedNodesLabel: "pair-1",
+								"topology.kubernetes.io/zone":                "zone-b",
+								pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-1",
 							},
 						},
 					},
@@ -1259,7 +1260,7 @@ func TestFindAvailableNodes(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "n1",
 						Labels: map[string]string{
-							OSDFleetManagerPairedNodesLabel: "pair-1",
+							pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-1",
 						},
 					},
 				},
@@ -1290,9 +1291,9 @@ func TestFindAvailableNodes(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Name: "n2",
 							Labels: map[string]string{
-								"topology.kubernetes.io/zone":   "zone-b",
-								hyperv1.HostedClusterLabel:      "other-cluster",
-								OSDFleetManagerPairedNodesLabel: "pair-1",
+								"topology.kubernetes.io/zone":                "zone-b",
+								hyperv1.HostedClusterLabel:                   "other-cluster",
+								pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-1",
 							},
 						},
 					},
@@ -1309,8 +1310,8 @@ func TestFindAvailableNodes(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Name: "n2",
 							Labels: map[string]string{
-								"topology.kubernetes.io/zone":   "zone-b",
-								OSDFleetManagerPairedNodesLabel: "pair-2",
+								"topology.kubernetes.io/zone":                "zone-b",
+								pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-2",
 							},
 						},
 					},
@@ -1321,7 +1322,7 @@ func TestFindAvailableNodes(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "n1",
 						Labels: map[string]string{
-							OSDFleetManagerPairedNodesLabel: "pair-1",
+							pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-1",
 						},
 					},
 				},
@@ -1336,8 +1337,8 @@ func TestFindAvailableNodes(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Name: "n2",
 							Labels: map[string]string{
-								"topology.kubernetes.io/zone":   "zone-a",
-								OSDFleetManagerPairedNodesLabel: "pair-1",
+								"topology.kubernetes.io/zone":                "zone-a",
+								pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-1",
 							},
 						},
 					},
@@ -1348,7 +1349,7 @@ func TestFindAvailableNodes(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "n1",
 						Labels: map[string]string{
-							OSDFleetManagerPairedNodesLabel: "pair-1",
+							pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-1",
 						},
 					},
 				},
@@ -1390,9 +1391,9 @@ func TestUpdateHostedClusterAnnotations(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "n1",
 						Labels: map[string]string{
-							schedulerutil.GoMemLimitLabel:   "4096",
-							schedulerutil.LBSubnetsLabel:    "subnet-1.subnet-2",
-							OSDFleetManagerPairedNodesLabel: "pair-1",
+							pkgscheduler.GoMemLimitLabel:                 "4096",
+							schedulerutil.LBSubnetsLabel:                 "subnet-1.subnet-2",
+							pkgscheduler.OSDFleetManagerPairedNodesLabel: "pair-1",
 						},
 					},
 				},
@@ -1401,7 +1402,7 @@ func TestUpdateHostedClusterAnnotations(t *testing.T) {
 				hyperv1.HostedClusterScheduledAnnotation:     "true",
 				hyperv1.KubeAPIServerGOMemoryLimitAnnotation: "4096",
 				hyperv1.AWSLoadBalancerSubnetsAnnotation:     "subnet-1,subnet-2",
-				hyperv1.AWSLoadBalancerTargetNodesAnnotation: OSDFleetManagerPairedNodesLabel + "=pair-1",
+				hyperv1.AWSLoadBalancerTargetNodesAnnotation: pkgscheduler.OSDFleetManagerPairedNodesLabel + "=pair-1",
 			},
 		},
 		{
@@ -1553,9 +1554,9 @@ func TestClassifyDedicatedNodes(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name: name,
 				Labels: map[string]string{
-					hyperv1.RequestServingComponentLabel: "true",
-					hyperv1.NodeSizeLabel:                sizeLabel,
-					OSDFleetManagerPairedNodesLabel:      pairLabel,
+					hyperv1.RequestServingComponentLabel:         "true",
+					hyperv1.NodeSizeLabel:                        sizeLabel,
+					pkgscheduler.OSDFleetManagerPairedNodesLabel: pairLabel,
 				},
 			},
 		}
@@ -1586,7 +1587,7 @@ func TestClassifyDedicatedNodes(t *testing.T) {
 			expectedAvailLen: 0,
 		},
 		{
-			name: "When nodes are labeled for the cluster with matching size and pair, they should be goal nodes",
+			name: "When nodes are labeled for the cluster with matching size and pair, it should mark them as goal nodes",
 			nodes: []client.Object{
 				func() client.Object { n := mkNode("n1", hcKey, "pair-1", "small", false); return &n }(),
 				func() client.Object { n := mkNode("n2", hcKey, "pair-1", "small", false); return &n }(),
@@ -1597,7 +1598,7 @@ func TestClassifyDedicatedNodes(t *testing.T) {
 			expectedPairLabel: "pair-1",
 		},
 		{
-			name: "When nodes have no cluster label, they should be available nodes",
+			name: "When nodes have no cluster label, it should mark them as available nodes",
 			nodes: []client.Object{
 				func() client.Object { n := mkNode("n1", "", "pair-1", "small", false); return &n }(),
 			},
@@ -1804,7 +1805,7 @@ func TestDeletePairConfigMaps(t *testing.T) {
 			expectedRemaining: 0,
 		},
 		{
-			name: "When configmaps match the cluster, they should be deleted",
+			name: "When configmaps match the cluster, it should delete them",
 			existing: []client.Object{
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1821,7 +1822,7 @@ func TestDeletePairConfigMaps(t *testing.T) {
 			expectedRemaining: 0,
 		},
 		{
-			name: "When configmaps belong to a different cluster, they should not be deleted",
+			name: "When configmaps belong to a different cluster, it should not delete them",
 			existing: []client.Object{
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{

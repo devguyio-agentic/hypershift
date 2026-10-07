@@ -7,11 +7,12 @@ import (
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/kas"
-	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
+	cpomanifests "github.com/openshift/hypershift/pkg/manifests/cpo"
 	"github.com/openshift/hypershift/support/config"
 	component "github.com/openshift/hypershift/support/controlplane-component"
 	"github.com/openshift/hypershift/support/netutil"
 	"github.com/openshift/hypershift/support/podspec"
+	"github.com/openshift/hypershift/support/util"
 
 	configv1 "github.com/openshift/api/config/v1"
 
@@ -36,9 +37,16 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 	}
 
 	noProxy := []string{
-		manifests.KubeAPIServerService("").Name,
+		cpomanifests.KubeAPIServerService("").Name,
 		etcdHostname,
 		config.AuditWebhookService,
+	}
+
+	configuration := cpContext.HCP.Spec.Configuration
+
+	tlsArgs, err := config.TLSArgs(cpContext.HCP.Spec.Configuration.GetTLSSecurityProfile())
+	if err != nil {
+		return err
 	}
 
 	podspec.UpdateContainer(ComponentName, deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
@@ -47,15 +55,13 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 			etcdURL = cpContext.HCP.Spec.Etcd.Unmanaged.Endpoint
 		}
 
-		configuration := cpContext.HCP.Spec.Configuration
 		c.Args = append(c.Args,
 			fmt.Sprintf("--api-audiences=%s", cpContext.HCP.Spec.IssuerURL),
 			fmt.Sprintf("--etcd-servers=%s", etcdURL),
-			fmt.Sprintf("--tls-min-version=%s", config.MinTLSVersion(configuration.GetTLSSecurityProfile())),
 		)
 
-		if cipherSuites := config.CipherSuites(configuration.GetTLSSecurityProfile()); len(cipherSuites) != 0 {
-			c.Args = append(c.Args, fmt.Sprintf("--tls-cipher-suites=%s", strings.Join(cipherSuites, ",")))
+		if len(tlsArgs) > 0 {
+			c.Args = append(c.Args, tlsArgs...)
 		}
 
 		if cpContext.HCP.Spec.AuditWebhook != nil && len(cpContext.HCP.Spec.AuditWebhook.Name) > 0 {
@@ -68,6 +74,8 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 			tokenInactivityTimeout := configuration.OAuth.TokenConfig.AccessTokenInactivityTimeout.Duration.String()
 			c.Args = append(c.Args, fmt.Sprintf("--accesstoken-inactivity-timeout=%s", tokenInactivityTimeout))
 		}
+
+		c.Args = append(c.Args, fmt.Sprintf("--v=%d", resolveOAuthAPIServerVerbosity(cpContext.HCP)))
 
 		podspec.UpsertEnvVar(c, corev1.EnvVar{
 			Name:  "NO_PROXY",
@@ -90,6 +98,14 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 	)
 
 	return nil
+}
+
+func resolveOAuthAPIServerVerbosity(hcp *hyperv1.HostedControlPlane) int {
+	var level hyperv1.LogLevel
+	if hcp.Spec.OperatorConfiguration != nil {
+		level = hcp.Spec.OperatorConfiguration.OpenShiftOAuthAPIServer.LogLevel
+	}
+	return util.LogLevelToKlogVerbosity(level)
 }
 
 func applyAuditWebhookConfigFileVolume(podSpec *corev1.PodSpec, auditWebhookRef *corev1.LocalObjectReference) {
