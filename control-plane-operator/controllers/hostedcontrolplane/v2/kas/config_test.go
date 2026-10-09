@@ -1,7 +1,17 @@
 package kas
 
 import (
+	"encoding/json"
+	"errors"
 	"testing"
+
+	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/imageprovider"
+	"github.com/openshift/hypershift/support/api"
+	hcpconfig "github.com/openshift/hypershift/support/config"
+	component "github.com/openshift/hypershift/support/controlplane-component"
+	"github.com/openshift/hypershift/support/k8sutil"
+	"github.com/openshift/hypershift/support/testutil"
 
 	configv1 "github.com/openshift/api/config/v1"
 	kcpv1 "github.com/openshift/api/kubecontrolplane/v1"
@@ -12,25 +22,28 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	podsecurityadmissionv1 "k8s.io/pod-security-admission/admission/api/v1"
 
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
 )
 
 func TestGenerateConfig(t *testing.T) {
 	type testcase struct {
-		name     string
-		params   KubeAPIServerConfigParams
-		expected *kcpv1.KubeAPIServerConfig
+		name          string
+		params        KubeAPIServerConfigParams
+		expected      *kcpv1.KubeAPIServerConfig
+		expectedError string
 	}
 
 	testcases := []testcase{
 		{
-			name:     "defaults",
+			name:     "When using default params, it should return default config",
 			params:   KubeAPIServerConfigParams{},
 			expected: defaultKASConfig(),
 		},
 		{
-			name: "with additional named cerfiticates",
+			name: "When additional named certificates are provided, it should add them to serving info",
 			params: KubeAPIServerConfigParams{
 				NamedCertificates: []configv1.APIServerNamedServingCert{
 					{
@@ -62,7 +75,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with ExternalIPRanger configuration, with AutoAssignCIDRs",
+			name: "When ExternalIPRanger is configured with AutoAssignCIDRs, it should enable allowIngressIP",
 			params: KubeAPIServerConfigParams{
 				ExternalIPConfig: &configv1.ExternalIPConfig{
 					Policy: &configv1.ExternalIPPolicy{
@@ -100,7 +113,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with ExternalIPRanger configuration, without AutoAssignCIDRs",
+			name: "When ExternalIPRanger is configured without AutoAssignCIDRs, it should disable allowIngressIP",
 			params: KubeAPIServerConfigParams{
 				ExternalIPConfig: &configv1.ExternalIPConfig{
 					Policy: &configv1.ExternalIPPolicy{
@@ -135,7 +148,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with ClusterNetwork and ServiceNetwork configuration",
+			name: "When ClusterNetwork and ServiceNetwork are configured, it should set restricted CIDRs and services subnet",
 			params: KubeAPIServerConfigParams{
 				ClusterNetwork: []string{
 					"10.0.0.0/16",
@@ -168,7 +181,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with KAS Pod port configuration",
+			name: "When KAS Pod port is configured, it should set bind address",
 			params: KubeAPIServerConfigParams{
 				KASPodPort: 8080,
 			},
@@ -179,7 +192,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with TLS profile configuration",
+			name: "When TLS profile is configured, it should set TLS version and cipher suites",
 			params: KubeAPIServerConfigParams{
 				TLSSecurityProfile: &configv1.TLSSecurityProfile{
 					Type: configv1.TLSProfileModernType,
@@ -195,7 +208,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with additional CORS allowed origin configuration",
+			name: "When additional CORS allowed origins are provided, it should append them to the list",
 			params: KubeAPIServerConfigParams{
 				AdditionalCORSAllowedOrigins: []string{
 					"abcdef",
@@ -208,7 +221,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with console public URL configuration",
+			name: "When console public URL is configured, it should set the console public URL",
 			params: KubeAPIServerConfigParams{
 				ConsolePublicURL: "https://console.public.io",
 			},
@@ -219,7 +232,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with image policy configuration",
+			name: "When image policy is configured, it should set registry hostnames",
 			params: KubeAPIServerConfigParams{
 				InternalRegistryHostName: "internal",
 				ExternalRegistryHostNames: []string{
@@ -240,7 +253,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with default node selector configuration",
+			name: "When default node selector is configured, it should set project config",
 			params: KubeAPIServerConfigParams{
 				DefaultNodeSelector: "foo=bar",
 			},
@@ -253,7 +266,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with feature gate OpenShiftPodSecurityAdmission=true configuration",
+			name: "When OpenShiftPodSecurityAdmission feature gate is enabled, it should configure restricted pod security defaults",
 			params: KubeAPIServerConfigParams{
 				FeatureGates: []string{
 					"OpenShiftPodSecurityAdmission=true",
@@ -291,7 +304,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with auth type None",
+			name: "When auth type is None, it should clear OAuth metadata file",
 			params: KubeAPIServerConfigParams{
 				Authentication: &configv1.AuthenticationSpec{
 					Type: configv1.AuthenticationTypeNone,
@@ -304,7 +317,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with advertise address",
+			name: "When advertise address is provided, it should set the advertise-address argument",
 			params: KubeAPIServerConfigParams{
 				AdvertiseAddress: "foo",
 			},
@@ -315,7 +328,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with service account issuer URL",
+			name: "When service account issuer URL is provided, it should configure SA issuer arguments",
 			params: KubeAPIServerConfigParams{
 				ServiceAccountIssuerURL: "https://issuer.io",
 			},
@@ -328,7 +341,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with cloud provider config ref",
+			name: "When cloud provider config ref is provided, it should set cloud-config argument",
 			params: KubeAPIServerConfigParams{
 				CloudProviderConfigRef: &corev1.LocalObjectReference{
 					Name: "foo",
@@ -341,7 +354,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with unrecognized cloud provider config",
+			name: "When unrecognized cloud provider is configured, it should set cloud-provider argument",
 			params: KubeAPIServerConfigParams{
 				CloudProvider: "alibaba",
 			},
@@ -352,7 +365,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with audit webhook enabled",
+			name: "When audit webhook is enabled, it should configure audit webhook arguments",
 			params: KubeAPIServerConfigParams{
 				AuditWebhookEnabled: true,
 			},
@@ -365,7 +378,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with profiling disabled",
+			name: "When profiling is disabled, it should set profiling argument to false",
 			params: KubeAPIServerConfigParams{
 				DisableProfiling: true,
 			},
@@ -376,7 +389,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with profiling disabled",
+			name: "When profiling is disabled, it should set profiling argument to false",
 			params: KubeAPIServerConfigParams{
 				DisableProfiling: true,
 			},
@@ -387,7 +400,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with OAuth disabled",
+			name: "When OAuth is disabled, it should configure OIDC authentication",
 			params: KubeAPIServerConfigParams{
 				Authentication: &configv1.AuthenticationSpec{
 					Type: configv1.AuthenticationTypeOIDC,
@@ -458,7 +471,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with etcd URL",
+			name: "When etcd URL is provided, it should set etcd-servers argument",
 			params: KubeAPIServerConfigParams{
 				EtcdURL: "https://etcd.io",
 			},
@@ -469,7 +482,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with goaway chance",
+			name: "When goaway chance is configured, it should set goaway-chance argument",
 			params: KubeAPIServerConfigParams{
 				GoAwayChance: "something",
 			},
@@ -480,7 +493,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with max mutating requests in flight",
+			name: "When max mutating requests in flight is configured, it should set the argument",
 			params: KubeAPIServerConfigParams{
 				MaxMutatingRequestsInflight: "20",
 			},
@@ -491,7 +504,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with max requests in flight",
+			name: "When max requests in flight is configured, it should set the argument",
 			params: KubeAPIServerConfigParams{
 				MaxRequestsInflight: "20",
 			},
@@ -502,7 +515,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with DynamicResourceAllocation feature gate enabled",
+			name: "When DynamicResourceAllocation feature gate is enabled, it should configure runtime-config",
 			params: KubeAPIServerConfigParams{
 				FeatureGates: []string{
 					"DynamicResourceAllocation=true",
@@ -516,7 +529,72 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with ValidatingAdmissionPolicy feature gate explicitly enabled",
+			name: "When DRADeviceTaintRules is enabled on Kubernetes 1.36, it should enable the v1beta2 API",
+			params: KubeAPIServerConfigParams{
+				FeatureGates: []string{
+					"DRADeviceTaintRules=true",
+				},
+				KubernetesVersion: "1.36.3",
+			},
+			expected: modifyKasConfig(defaultKASConfig(),
+				func(kasc *kcpv1.KubeAPIServerConfig) {
+					kasc.APIServerArguments["runtime-config"] = append(kcpv1.Arguments{"resource.k8s.io/v1beta2=true"}, kasc.APIServerArguments["runtime-config"]...)
+					kasc.APIServerArguments["feature-gates"] = append(kcpv1.Arguments{"DRADeviceTaintRules=true"}, kasc.APIServerArguments["feature-gates"]...)
+				},
+			),
+		},
+		{
+			name: "When DRADeviceTaintRules is enabled on Kubernetes 1.35, it should not enable the v1beta2 API",
+			params: KubeAPIServerConfigParams{
+				FeatureGates: []string{
+					"DRADeviceTaintRules=true",
+				},
+				KubernetesVersion: "1.35.0",
+			},
+			expected: modifyKasConfig(defaultKASConfig(),
+				func(kasc *kcpv1.KubeAPIServerConfig) {
+					kasc.APIServerArguments["feature-gates"] = append(kcpv1.Arguments{"DRADeviceTaintRules=true"}, kasc.APIServerArguments["feature-gates"]...)
+				},
+			),
+		},
+		{
+			name: "When DRADeviceTaintRules is enabled on Kubernetes 1.37, it should not enable the v1beta2 API",
+			params: KubeAPIServerConfigParams{
+				FeatureGates: []string{
+					"DRADeviceTaintRules=true",
+				},
+				KubernetesVersion: "1.37.0",
+			},
+			expected: modifyKasConfig(defaultKASConfig(),
+				func(kasc *kcpv1.KubeAPIServerConfig) {
+					kasc.APIServerArguments["feature-gates"] = append(kcpv1.Arguments{"DRADeviceTaintRules=true"}, kasc.APIServerArguments["feature-gates"]...)
+				},
+			),
+		},
+		{
+			name: "When DRADeviceTaintRules is disabled, it should not enable the v1beta2 API",
+			params: KubeAPIServerConfigParams{
+				FeatureGates: []string{
+					"DRADeviceTaintRules=false",
+				},
+			},
+			expected: modifyKasConfig(defaultKASConfig(),
+				func(kasc *kcpv1.KubeAPIServerConfig) {
+					kasc.APIServerArguments["feature-gates"] = append(kcpv1.Arguments{"DRADeviceTaintRules=false"}, kasc.APIServerArguments["feature-gates"]...)
+				},
+			),
+		},
+		{
+			name: "When DRADeviceTaintRules is enabled without a Kubernetes version, it should return an error",
+			params: KubeAPIServerConfigParams{
+				FeatureGates: []string{
+					"DRADeviceTaintRules=true",
+				},
+			},
+			expectedError: `failed to parse Kubernetes version "" for DRADeviceTaintRules`,
+		},
+		{
+			name: "When ValidatingAdmissionPolicy feature gate is explicitly enabled, it should return default config",
 			params: KubeAPIServerConfigParams{
 				FeatureGates: []string{
 					"ValidatingAdmissionPolicy=true",
@@ -526,7 +604,7 @@ func TestGenerateConfig(t *testing.T) {
 			expected: defaultKASConfig(),
 		},
 		{
-			name: "with ValidatingAdmissionPolicy feature gate explicitly disabled",
+			name: "When ValidatingAdmissionPolicy feature gate is explicitly disabled, it should return default config",
 			params: KubeAPIServerConfigParams{
 				FeatureGates: []string{
 					"ValidatingAdmissionPolicy=false",
@@ -536,7 +614,7 @@ func TestGenerateConfig(t *testing.T) {
 			expected: defaultKASConfig(),
 		},
 		{
-			name: "with StructuredAuthenticationConfiguration feature gate explicitly disabled",
+			name: "When StructuredAuthenticationConfiguration feature gate is explicitly disabled, it should return default config",
 			params: KubeAPIServerConfigParams{
 				FeatureGates: []string{
 					"StructuredAuthenticationConfiguration=false",
@@ -546,7 +624,7 @@ func TestGenerateConfig(t *testing.T) {
 			expected: defaultKASConfig(),
 		},
 		{
-			name: "with strict transport security directive",
+			name: "When strict transport security directive is configured, it should set the directive argument",
 			params: KubeAPIServerConfigParams{
 				APIServerSTSDirectives: "foo",
 			},
@@ -557,7 +635,7 @@ func TestGenerateConfig(t *testing.T) {
 			),
 		},
 		{
-			name: "with MutatingAdmissionPolicy feature gate enabled",
+			name: "When MutatingAdmissionPolicy feature gate is enabled, it should not add v1alpha1 runtime-config",
 			params: KubeAPIServerConfigParams{
 				FeatureGates: []string{
 					"MutatingAdmissionPolicy=true",
@@ -565,13 +643,12 @@ func TestGenerateConfig(t *testing.T) {
 			},
 			expected: modifyKasConfig(defaultKASConfig(),
 				func(kasc *kcpv1.KubeAPIServerConfig) {
-					kasc.APIServerArguments["runtime-config"] = append(kcpv1.Arguments{"admissionregistration.k8s.io/v1alpha1=true"}, kasc.APIServerArguments["runtime-config"]...)
 					kasc.APIServerArguments["feature-gates"] = append(kcpv1.Arguments{"MutatingAdmissionPolicy=true"}, kasc.APIServerArguments["feature-gates"]...)
 				},
 			),
 		},
 		{
-			name: "with service account max token expiration",
+			name: "When service account max token expiration is configured, it should set the argument",
 			params: KubeAPIServerConfigParams{
 				ServiceAccountMaxTokenExpiration: "24h",
 			},
@@ -585,12 +662,169 @@ func TestGenerateConfig(t *testing.T) {
 
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			kasConfig, _ := generateConfig(tc.params)
+			kasConfig, err := generateConfig(tc.params)
+			if tc.expectedError != "" {
+				require.ErrorContains(t, err, tc.expectedError)
+				return
+			}
+			require.NoError(t, err)
 
 			diff := cmp.Diff(tc.expected, kasConfig)
 			require.Empty(t, diff, "expected KAS config does not match actual")
 		})
 	}
+}
+
+func TestKubernetesVersionForFeatureGates(t *testing.T) {
+	testCases := []struct {
+		name             string
+		featureGates     []string
+		componentVersion map[string]string
+		componentError   error
+		expectedVersion  string
+		expectedError    string
+	}{
+		{
+			name:           "When DRADeviceTaintRules is not enabled, it should not request component versions",
+			componentError: errors.New("component versions should not be requested"),
+		},
+		{
+			name:         "When DRADeviceTaintRules is enabled, it should return the Kubernetes component version",
+			featureGates: []string{"DRADeviceTaintRules=true"},
+			componentVersion: map[string]string{
+				"kubernetes": "1.36.3",
+			},
+			expectedVersion: "1.36.3",
+		},
+		{
+			name:           "When component version lookup fails, it should return an error",
+			featureGates:   []string{"DRADeviceTaintRules=true"},
+			componentError: errors.New("lookup failed"),
+			expectedError:  "failed to get control plane component versions: lookup failed",
+		},
+		{
+			name:             "When the Kubernetes component version is missing, it should return an error",
+			featureGates:     []string{"DRADeviceTaintRules=true"},
+			componentVersion: map[string]string{},
+			expectedError:    "control plane Kubernetes component version is missing",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			releaseImageProvider := &componentVersionReleaseImageProvider{
+				ReleaseImageProvider: testutil.FakeImageProvider(),
+				componentVersions:    tc.componentVersion,
+				componentError:       tc.componentError,
+			}
+			version, err := kubernetesVersionForFeatureGates(tc.featureGates, releaseImageProvider)
+			if tc.expectedError != "" {
+				require.ErrorContains(t, err, tc.expectedError)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.expectedVersion, version)
+		})
+	}
+}
+
+func TestAdaptKubeAPIServerConfig(t *testing.T) {
+	const namespace = "hcp-namespace"
+
+	testCases := []struct {
+		name              string
+		enabledGates      []configv1.FeatureGateAttributes
+		disabledGates     []configv1.FeatureGateAttributes
+		componentVersions map[string]string
+		componentError    error
+		expectV1beta2     bool
+		expectedError     string
+	}{
+		{
+			name:              "When DRADeviceTaintRules is enabled on Kubernetes 1.36, it should enable the v1beta2 API in config.json",
+			enabledGates:      []configv1.FeatureGateAttributes{{Name: "DRADeviceTaintRules"}},
+			componentVersions: map[string]string{"kubernetes": "1.36.3"},
+			expectV1beta2:     true,
+		},
+		{
+			name:              "When DRADeviceTaintRules is enabled on Kubernetes 1.37, it should not enable the v1beta2 API in config.json",
+			enabledGates:      []configv1.FeatureGateAttributes{{Name: "DRADeviceTaintRules"}},
+			componentVersions: map[string]string{"kubernetes": "1.37.0"},
+		},
+		{
+			name:           "When DRADeviceTaintRules is disabled, it should not request component versions",
+			disabledGates:  []configv1.FeatureGateAttributes{{Name: "DRADeviceTaintRules"}},
+			componentError: errors.New("component versions should not be requested"),
+		},
+		{
+			name:           "When DRADeviceTaintRules is enabled and component version lookup fails, it should return an error",
+			enabledGates:   []configv1.FeatureGateAttributes{{Name: "DRADeviceTaintRules"}},
+			componentError: errors.New("lookup failed"),
+			expectedError:  "failed to get control plane component versions: lookup failed",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			featureGate := &configv1.FeatureGate{
+				Status: configv1.FeatureGateStatus{
+					FeatureGates: []configv1.FeatureGateDetails{{
+						Enabled:  tc.enabledGates,
+						Disabled: tc.disabledGates,
+					}},
+				},
+			}
+			manifest, err := k8sutil.SerializeResource(featureGate, api.Scheme)
+			require.NoError(t, err)
+			featureGateConfigMap := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      hcpconfig.FeatureGateConfigMapName,
+					Namespace: namespace,
+				},
+				Data: map[string]string{hcpconfig.FeatureGateConfigKey: manifest},
+			}
+
+			cpContext := component.WorkloadContext{
+				Context: t.Context(),
+				Client:  fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(featureGateConfigMap).Build(),
+				HCP: &hyperv1.HostedControlPlane{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+				},
+				ReleaseImageProvider: &componentVersionReleaseImageProvider{
+					ReleaseImageProvider: testutil.FakeImageProvider(),
+					componentVersions:    tc.componentVersions,
+					componentError:       tc.componentError,
+				},
+			}
+			config := &corev1.ConfigMap{}
+
+			err = adaptKubeAPIServerConfig(cpContext, config)
+			if tc.expectedError != "" {
+				require.ErrorContains(t, err, tc.expectedError)
+				return
+			}
+			require.NoError(t, err)
+
+			kasConfig := &kcpv1.KubeAPIServerConfig{}
+			require.NoError(t, json.Unmarshal([]byte(config.Data[KubeAPIServerConfigKey]), kasConfig))
+			runtimeConfig := kasConfig.APIServerArguments["runtime-config"]
+			if tc.expectV1beta2 {
+				require.Contains(t, runtimeConfig, "resource.k8s.io/v1beta2=true")
+			} else {
+				require.NotContains(t, runtimeConfig, "resource.k8s.io/v1beta2=true")
+			}
+		})
+	}
+}
+
+type componentVersionReleaseImageProvider struct {
+	imageprovider.ReleaseImageProvider
+	componentVersions map[string]string
+	componentError    error
+}
+
+func (p *componentVersionReleaseImageProvider) ComponentVersions() (map[string]string, error) {
+	return p.componentVersions, p.componentError
 }
 
 func defaultKASConfig() *kcpv1.KubeAPIServerConfig {

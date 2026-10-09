@@ -6,6 +6,7 @@ import (
 	"os"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	"github.com/openshift/hypershift/support/config"
 	"github.com/openshift/hypershift/support/images"
 	"github.com/openshift/hypershift/support/upsert"
 
@@ -18,29 +19,35 @@ import (
 	"k8s.io/utils/ptr"
 
 	capiibmv1 "sigs.k8s.io/cluster-api-provider-ibmcloud/api/v1beta2"
-	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
+	capiv1beta1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/blang/semver"
 )
 
-func New(capiProviderImage string) *PowerVS {
+func New(capiProviderImage string, payloadVersion *semver.Version) *PowerVS {
 	return &PowerVS{
 		capiProviderImage: capiProviderImage,
+		payloadVersion:    payloadVersion,
 	}
 }
 
 type PowerVS struct {
 	capiProviderImage string
+	payloadVersion    *semver.Version
 }
 
 func (p PowerVS) DeleteCredentials(ctx context.Context, c client.Client, hcluster *hyperv1.HostedCluster, controlPlaneNamespace string) error {
-	//TODO(mkumatag): implement me
+	// TODO(mkumatag): implement me
 	return nil
 }
 
 func (p PowerVS) ReconcileCAPIInfraCR(ctx context.Context, c client.Client, createOrUpdate upsert.CreateOrUpdateFN,
 	hcluster *hyperv1.HostedCluster,
 	controlPlaneNamespace string,
-	apiEndpoint hyperv1.APIEndpoint) (client.Object, error) {
+	apiEndpoint hyperv1.APIEndpoint,
+) (client.Object, error) {
 	ibmCluster := &capiibmv1.IBMPowerVSCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: controlPlaneNamespace,
@@ -57,7 +64,7 @@ func (p PowerVS) ReconcileCAPIInfraCR(ctx context.Context, c client.Client, crea
 
 		// Set the values for upper level controller
 		ibmCluster.Status.Ready = true
-		ibmCluster.Spec.ControlPlaneEndpoint = capiv1.APIEndpoint{
+		ibmCluster.Spec.ControlPlaneEndpoint = capiv1beta1.APIEndpoint{
 			Host: apiEndpoint.Host,
 			Port: apiEndpoint.Port,
 		}
@@ -75,7 +82,7 @@ func (p PowerVS) ReconcileCAPIInfraCR(ctx context.Context, c client.Client, crea
 	return ibmCluster, nil
 }
 
-func (p PowerVS) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *hyperv1.HostedControlPlane) (*appsv1.DeploymentSpec, error) {
+func (p PowerVS) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, hcp *hyperv1.HostedControlPlane) (*appsv1.DeploymentSpec, error) {
 	defaultMode := int32(416)
 
 	providerImage := p.capiProviderImage
@@ -84,6 +91,22 @@ func (p PowerVS) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *
 	}
 	if override, ok := hcluster.Annotations[hyperv1.ClusterAPIPowerVSProviderImage]; ok {
 		providerImage = override
+	}
+
+	args := []string{
+		"--namespace", "$(MY_NAMESPACE)",
+		"--v=4",
+		"--leader-elect=true",
+		"--provider-id-fmt=v2",
+	}
+	if hcp != nil && p.payloadVersion != nil && (p.payloadVersion.Major >= 5 || (p.payloadVersion.Major == 4 && p.payloadVersion.Minor >= 23)) {
+		tlsArgs, err := config.TLSArgs(hcp.Spec.Configuration.GetTLSSecurityProfile())
+		if err != nil {
+			return nil, err
+		}
+		if len(tlsArgs) > 0 {
+			args = append(args, tlsArgs...)
+		}
 	}
 
 	deploymentSpec := &appsv1.DeploymentSpec{
@@ -146,11 +169,7 @@ func (p PowerVS) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *
 							},
 						},
 						Command: []string{"/bin/cluster-api-provider-ibmcloud-controller-manager"},
-						Args: []string{"--namespace", "$(MY_NAMESPACE)",
-							"--v=4",
-							"--leader-elect=true",
-							"--provider-id-fmt=v2",
-						},
+						Args:    args,
 						Ports: []corev1.ContainerPort{
 							{
 								Name:          "healthz",
@@ -184,7 +203,8 @@ func (p PowerVS) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *
 
 func (p PowerVS) ReconcileCredentials(ctx context.Context, c client.Client, createOrUpdate upsert.CreateOrUpdateFN,
 	hcluster *hyperv1.HostedCluster,
-	controlPlaneNamespace string) error {
+	controlPlaneNamespace string,
+) error {
 	// Reconcile the platform provider cloud controller credentials secret by resolving
 	// the reference from the HostedCluster and syncing the secret in the control
 	// plane namespace.
@@ -365,7 +385,8 @@ func (p PowerVS) ReconcileCredentials(ctx context.Context, c client.Client, crea
 
 func (PowerVS) ReconcileSecretEncryption(ctx context.Context, c client.Client, createOrUpdate upsert.CreateOrUpdateFN,
 	hcluster *hyperv1.HostedCluster,
-	controlPlaneNamespace string) error {
+	controlPlaneNamespace string,
+) error {
 	return nil
 }
 

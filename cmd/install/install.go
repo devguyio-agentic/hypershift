@@ -33,6 +33,7 @@ import (
 	"github.com/openshift/hypershift/cmd/util"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/sharedingress"
 	hyperapi "github.com/openshift/hypershift/support/api"
+	capicrdmigrator "github.com/openshift/hypershift/support/capi-crdmigrator"
 	"github.com/openshift/hypershift/support/config"
 	"github.com/openshift/hypershift/support/metrics"
 	"github.com/openshift/hypershift/support/rhobsmonitoring"
@@ -46,6 +47,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -64,9 +66,10 @@ import (
 )
 
 const (
-	// ExternalDNSImage - This is specifically tag 1.2.1 from https://catalog.redhat.com/software/containers/edo/external-dns-rhel8/61d4c35023156829b87a434a
-	// TODO this needs to be updated to a multi-arch image including Arm - https://issues.redhat.com/browse/NE-1298
-	ExternalDNSImage = "registry.redhat.io/edo/external-dns-rhel8@sha256:9f60c682b44497d9736a04991c0d2b3485d477f6c89a87c4a44a211a3d1f3cd4"
+	// ExternalDNSImage - external-dns-rhel9 1.3.9 from https://catalog.redhat.com/software/containers/edo/external-dns-rhel9
+	// Contains NS record trailing dot fix for Google Cloud DNS (upstream PR#4847, openshift/external-dns PR#125)
+	// Multi-arch manifest list (amd64 + arm64/v8).
+	ExternalDNSImage = "registry.redhat.io/edo/external-dns-rhel9@sha256:4450e6eac021e7f88f756f62e1043d6f8d6baddf99080ec4ad367c68ef5191f5"
 )
 
 var HyperShiftImage = fmt.Sprintf("%s:%s", config.HypershiftImageBase, config.HypershiftImageTag)
@@ -149,6 +152,7 @@ type Options struct {
 	EnableSizeTagging                         bool
 	EnableEtcdRecovery                        bool
 	EnableCPOOverrides                        bool
+	EnableStandaloneKarpenterOperator         bool
 	AroHCPKeyVaultUsersClientID               string
 	TechPreviewNoUpgrade                      bool
 	RegistryOverrides                         string
@@ -165,6 +169,8 @@ type Options struct {
 	RenderSensitive                           bool
 	HCPEgressBlockCIDRs                       []string
 	InstallScope                              string
+	DisableCAPIMigration                      bool
+	ClientProvider                            *util.ClientProvider
 }
 
 func (o *Options) Complete() error {
@@ -428,7 +434,8 @@ func (o *Options) ApplyDefaults() {
 	}
 }
 
-func NewCommand() *cobra.Command {
+func NewCommand(clientProviders ...*util.ClientProvider) *cobra.Command {
+	clientProvider := util.ResolveClientProvider(clientProviders...)
 	cmd := &cobra.Command{
 		Use:          "install",
 		Short:        "Installs the HyperShift operator",
@@ -436,6 +443,7 @@ func NewCommand() *cobra.Command {
 	}
 
 	opts := NewInstallOptionsWithDefaults()
+	opts.ClientProvider = clientProvider
 
 	cmd.PersistentFlags().StringVar(&opts.Namespace, "namespace", opts.Namespace, "The namespace in which to install HyperShift")
 	cmd.PersistentFlags().StringVar(&opts.HyperShiftImage, "hypershift-image", opts.HyperShiftImage, "The HyperShift image to deploy")
@@ -445,6 +453,7 @@ func NewCommand() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&opts.EnableValidatingWebhook, "enable-validating-webhook", opts.EnableValidatingWebhook, "Enable webhook for validating hypershift API types")
 	cmd.PersistentFlags().BoolVar(&opts.EnableConversionWebhook, "enable-conversion-webhook", opts.EnableConversionWebhook, "Enable webhook for converting hypershift API types")
 	cmd.PersistentFlags().BoolVar(&opts.DisableCAPIConversionWebhook, "disable-capi-conversion-webhook", opts.DisableCAPIConversionWebhook, "Disable conversion webhook for CAPI CRDs during v1beta1/v1beta2 transition")
+	cmd.PersistentFlags().BoolVar(&opts.DisableCAPIMigration, "disable-capi-migration", opts.DisableCAPIMigration, "Disable automatic CAPI CRD storage version migration from v1beta1 to v1beta2")
 	cmd.PersistentFlags().BoolVar(&opts.ExcludeEtcdManifests, "exclude-etcd", opts.ExcludeEtcdManifests, "Leave out etcd manifests")
 	cmd.PersistentFlags().Var(&opts.PlatformMonitoring, "platform-monitoring", "Select an option for enabling platform cluster monitoring. Valid values are: None, OperatorOnly, All")
 	cmd.PersistentFlags().BoolVar(&opts.EnableCIDebugOutput, "enable-ci-debug-output", opts.EnableCIDebugOutput, "If extra CI debug output should be enabled")
@@ -497,6 +506,7 @@ func NewCommand() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&opts.EnableSizeTagging, "enable-size-tagging", opts.EnableSizeTagging, "If true, HyperShift will tag the HostedCluster with a size label corresponding to the number of worker nodes")
 	cmd.PersistentFlags().BoolVar(&opts.EnableEtcdRecovery, "enable-etcd-recovery", opts.EnableEtcdRecovery, "If true, the HyperShift operator checks for failed etcd pods and attempts a recovery if possible")
 	cmd.PersistentFlags().BoolVar(&opts.EnableCPOOverrides, "enable-cpo-overrides", opts.EnableCPOOverrides, "If true, the HyperShift operator uses a set of static overrides for the CPO image given specific release versions")
+	cmd.PersistentFlags().BoolVar(&opts.EnableStandaloneKarpenterOperator, "enable-standalone-karpenter-operator", opts.EnableStandaloneKarpenterOperator, "If true, the HyperShift operator deploys the standalone karpenter-operator binary instead of the karpenter-operator embedded in the HO image (default false)")
 	cmd.PersistentFlags().StringVar(&opts.AroHCPKeyVaultUsersClientID, "aro-hcp-key-vault-users-client-id", opts.AroHCPKeyVaultUsersClientID, "The client ID of the managed identity which can access the Azure Key Vaults, in an AKS management cluster, to retrieve secrets and certificates.")
 	// TODO: Would it make sense to deprecate this flag in favor of a new flag like `--feature-set=TechPreviewNoUpgrade`
 	// and make it so that setting this flag is essentially equivalent to that?
@@ -536,7 +546,13 @@ func InstallHyperShiftOperator(ctx context.Context, out io.Writer, opts Options)
 		return err
 	}
 
-	client, err := util.GetClient()
+	if opts.ClientProvider == nil {
+		opts.ClientProvider = util.DefaultClientProvider()
+	}
+	if opts.ClientProvider.ControllerRuntimeClient == nil {
+		return fmt.Errorf("controller-runtime client provider is not configured")
+	}
+	client, err := opts.ClientProvider.ControllerRuntimeClientFor("")
 	if err != nil {
 		return err
 	}
@@ -551,14 +567,14 @@ func InstallHyperShiftOperator(ctx context.Context, out io.Writer, opts Options)
 
 	if len(crdsToApply) > 0 {
 		// Validate all CRDs via dry-run before applying
-		if err := dryRunValidateCRDs(ctx, out, crdsToApply); err != nil {
+		if err := dryRunValidateCRDs(ctx, out, crdsToApply, client); err != nil {
 			return err
 		}
 
 		// Coordinate with Cluster CAPI Operator if the ClusterAPI API is available.
 		// This is done after dry-run so the ClusterAPI config is not mutated if CRDs
 		// cannot be applied.
-		config, err := util.GetConfig()
+		config, err := opts.ClientProvider.ConfigFor("")
 		if err != nil {
 			return fmt.Errorf("failed to get kubernetes config: %w", err)
 		}
@@ -583,26 +599,26 @@ func InstallHyperShiftOperator(ctx context.Context, out io.Writer, opts Options)
 			}
 		}
 
-		err = apply(ctx, out, crdsToApply)
+		err = apply(ctx, out, crdsToApply, client)
 		if err != nil {
 			return err
 		}
 
 		if opts.WaitUntilAvailable || opts.WaitUntilEstablished {
-			if err := waitUntilEstablished(ctx, crdsToApply); err != nil {
+			if err := waitUntilEstablished(ctx, crdsToApply, client); err != nil {
 				return err
 			}
 		}
 	}
 
 	if len(objectsToApply) > 0 {
-		err = apply(ctx, out, objectsToApply)
+		err = apply(ctx, out, objectsToApply, client)
 		if err != nil {
 			return err
 		}
 
 		if opts.WaitUntilAvailable {
-			if _, err := WaitUntilAvailable(ctx, opts); err != nil {
+			if _, err := WaitUntilAvailable(ctx, opts, client); err != nil {
 				return err
 			}
 		}
@@ -646,16 +662,15 @@ func NewInstallOptionsWithDefaults() Options {
 	opts.ImagePullPolicy = "IfNotPresent"
 	opts.AdditionalOperatorEnvVars = map[string]string{}
 	opts.InstallScope = string(OutputAll)
+	opts.ClientProvider = util.DefaultClientProvider()
 
 	return opts
 }
 
-func apply(ctx context.Context, out io.Writer, objects []crclient.Object) error {
-	client, err := util.GetClient()
-	if err != nil {
-		return err
+func apply(ctx context.Context, out io.Writer, objects []crclient.Object, client crclient.Client) error {
+	if client == nil {
+		return fmt.Errorf("management-cluster client is required")
 	}
-
 	var errs []error
 	for _, object := range objects {
 		var objectBytes bytes.Buffer
@@ -685,10 +700,9 @@ func apply(ctx context.Context, out io.Writer, objects []crclient.Object) error 
 	return errors.NewAggregate(errs)
 }
 
-func waitUntilEstablished(ctx context.Context, crds []crclient.Object) error {
-	client, err := util.GetClient()
-	if err != nil {
-		return err
+func waitUntilEstablished(ctx context.Context, crds []crclient.Object, client crclient.Client) error {
+	if client == nil {
+		return fmt.Errorf("management-cluster client is required")
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -715,12 +729,14 @@ func waitUntilEstablished(ctx context.Context, crds []crclient.Object) error {
 	return eg.Wait()
 }
 
-func WaitUntilAvailable(ctx context.Context, opts Options) (*appsv1.Deployment, error) {
-	client, err := util.GetClient()
-	if err != nil {
-		return nil, err
+func WaitUntilAvailable(ctx context.Context, opts Options, client crclient.Client) (*appsv1.Deployment, error) {
+	if client == nil {
+		return nil, fmt.Errorf("management-cluster client is required")
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	var err error
+	// 10 minutes to accommodate GKE Autopilot clusters that need to scale
+	// up nodes before the operator pods can be scheduled.
+	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
 	deployment := getOperatorDeployment(opts)
@@ -884,7 +900,7 @@ func hyperShiftOperatorManifests(ctx context.Context, client crclient.Client, op
 
 	// Setup ExternalDNS resources
 	if len(opts.ExternalDNSProvider) > 0 {
-		extDNSObjs, err := setupExternalDNS(ctx, opts, operatorNamespace)
+		extDNSObjs, err := setupExternalDNS(ctx, opts, operatorNamespace, client)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -952,12 +968,15 @@ var ipamCRDNames = set.New(
 	"ipaddresses.ipam.cluster.x-k8s.io",
 )
 
-// setupCRDs returns the CRDs from all the manifests under the assets directory as list of CustomResourceDefinition objects
+// crdIncludeFilter returns a predicate that determines which CRDs to install based on Options.
 //
-// The CRDs are filtered based on the options provided. If the option ExcludeEtcdManifests is set to true, the CRDs
-// related to etcd are excluded from the list. If the option EnableConversionWebhook is set to true, the CRDs related
-// to hypershift.openshift.io group are annotated with the necessary annotations to enable the conversion webhook.
-// If a client is provided, IPAM CRDs that already exist in the cluster are skipped to avoid conflicts.
+// Filters CRDs by:
+//   - ExcludeEtcdManifests: exclude etcd CRDs
+//   - TechPreviewNoUpgrade: include only CRDs with matching feature-set annotation
+//   - PlatformsToInstall: include only platform-specific CRDs (awsendpointservices, azureprivatelinkservices, CAPI provider CRDs)
+//   - EnableAuditLogPersistence: include auditlogpersistence CRDs
+//   - ExternalDNSProvider: include external-dns CRDs only when provider uses --source=crd (currently google only)
+//   - existingIPAMCRDs: skip IPAM CRDs already present in the cluster to avoid conflicts
 func crdIncludeFilter(opts Options, existingIPAMCRDs set.Set[string]) func(string, *apiextensionsv1.CustomResourceDefinition) bool {
 	return func(path string, crd *apiextensionsv1.CustomResourceDefinition) bool {
 		if strings.Contains(path, "payload-manifests") || strings.Contains(path, "tests/") {
@@ -996,6 +1015,10 @@ func crdIncludeFilter(opts Options, existingIPAMCRDs set.Set[string]) func(strin
 		if strings.Contains(path, "auditlogpersistence") {
 			return opts.EnableAuditLogPersistence
 		}
+		// Include external-dns CRDs only when external-dns runs with --source=crd
+		if strings.Contains(path, "external-dns") {
+			return assets.ExternalDNSProvider(opts.ExternalDNSProvider).UsesCRDSource()
+		}
 		if len(opts.PlatformsToInstall) > 0 {
 			for _, platform := range opts.PlatformsToInstall {
 				if strings.Contains(path, strings.ToLower(platform)) {
@@ -1006,6 +1029,13 @@ func crdIncludeFilter(opts Options, existingIPAMCRDs set.Set[string]) func(strin
 		}
 		return true
 	}
+}
+
+func capiStorageVersionForOpts(opts Options) string {
+	if opts.DisableCAPIMigration {
+		return capicrdmigrator.CurrentStorageVersion
+	}
+	return capicrdmigrator.TargetStorageVersion
 }
 
 func setupCRDs(ctx context.Context, client crclient.Client, opts Options, operatorNamespace *corev1.Namespace, operatorService *corev1.Service) ([]crclient.Object, error) {
@@ -1023,9 +1053,13 @@ func setupCRDs(ctx context.Context, client crclient.Client, opts Options, operat
 		}
 	}
 
+	capiStorageVersion := capiStorageVersionForOpts(opts)
+	capiOverrides := crdassets.CAPICRDOverridesWithStorageVersion(capiStorageVersion)
+
 	var crds []crclient.Object
 	crds = append(
 		crds, crdassets.CustomResourceDefinitions(
+			capiStorageVersion,
 			crdIncludeFilter(opts, existingIPAMCRDs),
 			func(crd *apiextensionsv1.CustomResourceDefinition) {
 				// Check if this CRD needs a conversion webhook
@@ -1039,7 +1073,7 @@ func setupCRDs(ctx context.Context, client crclient.Client, opts Options, operat
 
 					// CAPI conversion is required during v1beta1 -> v1beta2 transition period
 				} else if !opts.DisableCAPIConversionWebhook {
-					if override, ok := crdassets.CAPICRDOverrides[crd.Name]; ok && override.NeedsConversion {
+					if override, ok := capiOverrides[crd.Name]; ok && override.NeedsConversion {
 						needsConversion = true
 						conversionReviewVersions = []string{"v1beta1", "v1beta2"}
 					}
@@ -1168,7 +1202,8 @@ func ensureUnmanagedCRDs(ctx context.Context, out io.Writer, c crclient.Client, 
 			UnmanagedCustomResourceDefinitions: capiCRDNames.SortedList(),
 		},
 	}
-	if err := c.Patch(ctx, clusterAPI, crclient.RawPatch(types.ApplyPatchType, patchData),
+	if err := c.Patch(
+		ctx, clusterAPI, crclient.RawPatch(types.ApplyPatchType, patchData),
 		crclient.ForceOwnership, crclient.FieldOwner("hypershift"),
 	); err != nil {
 		return 0, fmt.Errorf("failed to apply ClusterAPI config: %w", err)
@@ -1209,12 +1244,10 @@ func waitForCAPIOperatorSync(ctx context.Context, out io.Writer, c crclient.Clie
 // dryRunValidateCRDs validates all CRDs through the API server's admission webhooks
 // using server-side dry-run. This catches malformed CRDs, webhook rejections, and
 // schema conflicts before any CRDs are persisted.
-func dryRunValidateCRDs(ctx context.Context, out io.Writer, crds []crclient.Object) error {
-	client, err := util.GetClient()
-	if err != nil {
-		return err
+func dryRunValidateCRDs(ctx context.Context, out io.Writer, crds []crclient.Object, client crclient.Client) error {
+	if client == nil {
+		return fmt.Errorf("management-cluster client is required")
 	}
-
 	var errs []error
 	for _, crd := range crds {
 		var objectBytes bytes.Buffer
@@ -1225,7 +1258,8 @@ func dryRunValidateCRDs(ctx context.Context, out io.Writer, crds []crclient.Obje
 		// Use a deep copy so the dry-run response (which includes managedFields)
 		// does not mutate the original CRD objects passed to apply().
 		crdCopy := crd.DeepCopyObject().(crclient.Object)
-		if err := client.Patch(ctx, crdCopy, crclient.RawPatch(types.ApplyPatchType, objectBytes.Bytes()),
+		if err := client.Patch(
+			ctx, crdCopy, crclient.RawPatch(types.ApplyPatchType, objectBytes.Bytes()),
 			crclient.ForceOwnership, crclient.FieldOwner("hypershift"), crclient.DryRunAll,
 		); err != nil {
 			errs = append(errs, fmt.Errorf("dry-run validation failed for CRD %s: %w", crd.GetName(), err))
@@ -1337,8 +1371,7 @@ func setupSharedIngress() []crclient.Object {
 	return objects
 }
 
-// setupOperatorResources creates the operator Deployment and Service resources.
-//
+// setupOperatorResources creates the operator Deployment, Service and PodDisruptionBudget resources.
 // Returns the Service and a list of resources to apply.
 func setupOperatorResources(opts Options, userCABundleCM *corev1.ConfigMap, trustedCABundle *corev1.ConfigMap, operatorNamespace *corev1.Namespace, operatorServiceAccount *corev1.ServiceAccount, operatorCredentialsSecret *corev1.Secret, azureCredentialsSecret *corev1.Secret, oidcSecret *corev1.Secret, scaleFromZeroSecret *corev1.Secret, images map[string]string) (*corev1.Service, []crclient.Object) {
 	operatorDeployment := assets.HyperShiftOperatorDeployment{
@@ -1381,6 +1414,7 @@ func setupOperatorResources(opts Options, userCABundleCM *corev1.ConfigMap, trus
 		EnableSizeTagging:                       opts.EnableSizeTagging,
 		EnableEtcdRecovery:                      opts.EnableEtcdRecovery,
 		EnableCPOOverrides:                      opts.EnableCPOOverrides,
+		EnableKarpenterOperator:                 opts.EnableStandaloneKarpenterOperator,
 		AdditionalOperatorEnvVars:               opts.AdditionalOperatorEnvVars,
 		AROHCPKeyVaultUsersClientID:             opts.AroHCPKeyVaultUsersClientID,
 		TechPreviewNoUpgrade:                    opts.TechPreviewNoUpgrade,
@@ -1391,13 +1425,17 @@ func setupOperatorResources(opts Options, userCABundleCM *corev1.ConfigMap, trus
 		ScaleFromZeroSecret:                     scaleFromZeroSecret,
 		ScaleFromZeroSecretKey:                  opts.ScaleFromZeroCredentialsSecretKey,
 		ScaleFromZeroProvider:                   opts.ScaleFromZeroProvider,
+		CAPIStorageVersion:                      capiStorageVersionForOpts(opts),
 		HCPEgressBlockCIDRs:                     opts.HCPEgressBlockCIDRs,
 	}.Build()
 	operatorService := assets.HyperShiftOperatorService{
 		Namespace: operatorNamespace,
 	}.Build()
+	operatorPodDisruptionBudget := assets.HyperShiftOperatorPodDisruptionBudget{
+		Namespace: operatorNamespace,
+	}.Build()
 
-	return operatorService, []crclient.Object{operatorDeployment, operatorService}
+	return operatorService, []crclient.Object{operatorDeployment, operatorService, operatorPodDisruptionBudget}
 }
 
 // setupExternalDNS creates the resources for external-dns
@@ -1409,21 +1447,21 @@ func setupOperatorResources(opts Options, userCABundleCM *corev1.ConfigMap, trus
 // - Secret for external-dns credentials
 // - Deployment for external-dns
 // - PodMonitor for external-dns
-func setupExternalDNS(ctx context.Context, opts Options, operatorNamespace *corev1.Namespace) ([]crclient.Object, error) {
+func setupExternalDNS(ctx context.Context, opts Options, operatorNamespace *corev1.Namespace, client crclient.Client) ([]crclient.Object, error) {
 	var objects []crclient.Object
 
-	// Setting the proxy for external-dns is best-effort, ignore errors
-	proxy, _ := func() (*configv1.Proxy, error) {
-		proxy := &configv1.Proxy{}
-		client, err := util.GetClient()
-		if err != nil {
-			return nil, err
+	// A nil client means the caller intentionally requested offline rendering.
+	var proxy *configv1.Proxy
+	if client != nil {
+		candidate := &configv1.Proxy{}
+		if err := client.Get(ctx, crclient.ObjectKey{Name: "cluster"}, candidate); err != nil {
+			if !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
+				_, _ = fmt.Fprintf(os.Stderr, "Warning: unable to retrieve management-cluster proxy for ExternalDNS, continuing without proxy: %v\n", err)
+			}
+		} else {
+			proxy = candidate
 		}
-		if err := client.Get(ctx, crclient.ObjectKey{Name: "cluster"}, proxy); err != nil {
-			return nil, err
-		}
-		return proxy, nil
-	}()
+	}
 
 	externalDNSServiceAccount := assets.ExternalDNSServiceAccount{
 		Namespace: operatorNamespace,
@@ -1433,7 +1471,8 @@ func setupExternalDNS(ctx context.Context, opts Options, operatorNamespace *core
 	externalDNSClusterRole := assets.ExternalDNSClusterRole{}.Build()
 	if opts.ExternalDNSProvider == "google" {
 		// GCP-386: Allow external-dns to read/update DNSEndpoint resources for ingress zone delegation
-		externalDNSClusterRole.Rules = append(externalDNSClusterRole.Rules,
+		externalDNSClusterRole.Rules = append(
+			externalDNSClusterRole.Rules,
 			rbacv1.PolicyRule{
 				APIGroups: []string{"externaldns.k8s.io"},
 				Resources: []string{"dnsendpoints"},

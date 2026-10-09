@@ -5,22 +5,25 @@ import (
 	"fmt"
 	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests/ignitionserver"
+	"github.com/openshift/hypershift/hypershift-operator/featuregate"
 	ignserver "github.com/openshift/hypershift/ignition-server/controllers"
+	"github.com/openshift/hypershift/pkg/manifests"
+	"github.com/openshift/hypershift/support/netutil"
+	"github.com/openshift/hypershift/support/reconcilerpolicy"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	"github.com/openshift/hypershift/support/supportedversion"
-	"github.com/openshift/hypershift/support/util"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -100,17 +103,17 @@ func FindStatusCondition(conditions []hyperv1.NodePoolCondition, conditionType s
 
 // machineConditionResult normalizes a CAPI Machine condition into a common struct.
 type machineConditionResult struct {
-	Status  corev1.ConditionStatus
+	Status  metav1.ConditionStatus
 	Reason  string
 	Message string
 }
 
 // findMachineStatusCondition looks up a condition on a CAPI Machine from
-// Machine.Status.Conditions ([]capiv1.Condition).
+// Machine.Status.Conditions ([]metav1.Condition).
 // Returns nil if the condition is not found.
 func findMachineStatusCondition(machine *capiv1.Machine, conditionType string) *machineConditionResult {
 	for i := range machine.Status.Conditions {
-		if string(machine.Status.Conditions[i].Type) == conditionType {
+		if machine.Status.Conditions[i].Type == conditionType {
 			return &machineConditionResult{
 				Status:  machine.Status.Conditions[i].Status,
 				Reason:  machine.Status.Conditions[i].Reason,
@@ -124,9 +127,9 @@ func findMachineStatusCondition(machine *capiv1.Machine, conditionType string) *
 
 // generateReconciliationActiveCondition will generate the resource condition that reflects the state of reconciliation
 // on the resource.
-// (copied from support/util/pausereconcile_test.go and adjusted to use NodePoolCondition)
+// (copied from support/reconcilerpolicy/pausereconcile.go and adjusted to use NodePoolCondition)
 func generateReconciliationActiveCondition(pausedUntilField *string, objectGeneration int64) hyperv1.NodePoolCondition {
-	isPaused, _, err := util.ProcessPausedUntilField(pausedUntilField, time.Now())
+	isPaused, _, err := reconcilerpolicy.ProcessPausedUntilField(pausedUntilField, time.Now())
 	var msgString string
 	if isPaused {
 		if _, err := strconv.ParseBool(*pausedUntilField); err == nil {
@@ -159,16 +162,16 @@ func generateReconciliationActiveCondition(pausedUntilField *string, objectGener
 
 // setPlatformConditions is a hook for platforms to implement custom logic/conditions freely
 // TODO: refactor signature to be inline with the rest of condition setters, and move common conditions like NodePoolValidPlatformImageType to a separate function.
-func (r *NodePoolReconciler) setPlatformConditions(ctx context.Context, hcluster *hyperv1.HostedCluster, nodePool *hyperv1.NodePool, controlPlaneNamespace string, releaseImage *releaseinfo.ReleaseImage) error {
+func (r *NodePoolReconciler) setPlatformConditions(ctx context.Context, hcluster *hyperv1.HostedCluster, nodePool *hyperv1.NodePool, controlPlaneNamespace string, releaseImage *releaseinfo.ReleaseImage, resolvedRHELStream string) error {
 	switch nodePool.Spec.Platform.Type {
 	case hyperv1.KubevirtPlatform:
-		return r.setKubevirtConditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage)
+		return r.setKubevirtConditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage, resolvedRHELStream)
 	case hyperv1.AWSPlatform:
-		return r.setAWSConditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage)
+		return r.setAWSConditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage, resolvedRHELStream)
 	case hyperv1.PowerVSPlatform:
-		return r.setPowerVSconditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage)
+		return r.setPowerVSconditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage, resolvedRHELStream)
 	case hyperv1.OpenStackPlatform:
-		return r.setOpenStackConditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage)
+		return r.setOpenStackConditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage, resolvedRHELStream)
 	default:
 		return nil
 	}
@@ -283,6 +286,31 @@ func (r *NodePoolReconciler) ignitionEndpointAvailableCondition(ctx context.Cont
 		log.Info("Ignition endpoint not available, waiting")
 		return &ctrl.Result{}, nil
 	}
+	// Gate on AzurePlatform (not just ARO HCP) because Azure DNS API throttling
+	// (429s) can delay any Azure DNS zone, not only ARO-managed ones.
+	// ServiceExternalDNSHostnameByHC already narrows this to public clusters with
+	// an explicit external DNS hostname, so self-managed Azure without external
+	// DNS is unaffected.
+	if hcluster.Spec.Platform.Type == hyperv1.AzurePlatform {
+		ignitionHostname := netutil.ServiceExternalDNSHostnameByHC(hcluster, hyperv1.Ignition)
+		if ignitionHostname != "" {
+			resolveDNSHostname := r.resolveDNSHostname
+			if resolveDNSHostname == nil {
+				resolveDNSHostname = netutil.ResolveDNSHostname
+			}
+			if err := resolveDNSHostname(ctx, ignitionHostname); err != nil {
+				SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
+					Type:               string(hyperv1.IgnitionEndpointAvailable),
+					Status:             corev1.ConditionFalse,
+					Reason:             hyperv1.ExternalDNSHostNotReachableReason,
+					Message:            fmt.Sprintf("Ignition endpoint DNS hostname %q is not resolvable: %v", ignitionHostname, err),
+					ObservedGeneration: nodePool.Generation,
+				})
+				log.Info("Ignition endpoint DNS hostname is not resolvable, waiting")
+				return &ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
+		}
+	}
 	removeStatusCondition(&nodePool.Status.Conditions, string(hyperv1.IgnitionEndpointAvailable))
 
 	caSecret := ignitionserver.IgnitionCACertSecret(controlPlaneNamespace)
@@ -367,7 +395,8 @@ func (r *NodePoolReconciler) validMachineConfigCondition(ctx context.Context, no
 	}
 
 	// Validate osImageStream before expensive config generation to fail fast.
-	if err := validateOSImageStream(ctx, r.Client, nodePool, releaseImage); err != nil {
+	osStreamsEnabled := featuregate.Gate().Enabled(featuregate.OSStreams)
+	if err := validateOSImageStream(ctx, r.Client, nodePool, releaseImage, osStreamsEnabled); err != nil {
 		SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolValidMachineConfigConditionType,
 			Status:             corev1.ConditionFalse,
@@ -384,7 +413,18 @@ func (r *NodePoolReconciler) validMachineConfigCondition(ctx context.Context, no
 	}
 
 	controlPlaneNamespace := manifests.HostedControlPlaneNamespace(hcluster.Namespace, hcluster.Name)
-	_, err = NewConfigGenerator(ctx, r.Client, hcluster, nodePool, releaseImage, haproxyRawConfig, controlPlaneNamespace)
+	resolvedRHELStream, err := GetRHELStreamForBootImage(ctx, r.Client, nodePool, releaseImage, osStreamsEnabled)
+	if err != nil {
+		SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
+			Type:               hyperv1.NodePoolValidPlatformImageType,
+			Status:             corev1.ConditionFalse,
+			Reason:             hyperv1.NodePoolValidationFailedReason,
+			Message:            err.Error(),
+			ObservedGeneration: nodePool.Generation,
+		})
+		return &ctrl.Result{}, fmt.Errorf("failed to resolve RHEL stream for boot image: %w", err)
+	}
+	_, err = NewConfigGenerator(ctx, r.Client, hcluster, nodePool, releaseImage, haproxyRawConfig, controlPlaneNamespace, resolvedRHELStream)
 	if err != nil {
 		SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolValidMachineConfigConditionType,
@@ -648,10 +688,10 @@ func (r *NodePoolReconciler) setAllNodesHealthyCondition(nodePool *hyperv1.NodeP
 				// NodeHealthy condition not yet reported; treat as not healthy.
 				status = corev1.ConditionFalse
 				numNotHealthy++
-				mapReason := capiv1.WaitingForNodeRefReason
+				mapReason := capiv1.WaitingForNodeRefV1Beta1Reason
 				mapMessage := fmt.Sprintf("Machine %s: %s\n", machine.Name, mapReason)
 				messageMap[mapReason] = append(messageMap[mapReason], mapMessage)
-			} else if condition.Status != corev1.ConditionTrue {
+			} else if condition.Status != metav1.ConditionTrue {
 				status = corev1.ConditionFalse
 				numNotHealthy++
 				mapReason := condition.Reason
@@ -711,10 +751,10 @@ func (r *NodePoolReconciler) setAllMachinesReadyCondition(nodePool *hyperv1.Node
 				// Ready condition not yet reported; treat as not ready.
 				status = corev1.ConditionFalse
 				numNotReady++
-				mapReason := capiv1.WaitingForInfrastructureFallbackReason
+				mapReason := capiv1.WaitingForInfrastructureFallbackV1Beta1Reason
 				mapMessage := fmt.Sprintf("Machine %s: %s\n", machine.Name, mapReason)
 				messageMap[mapReason] = append(messageMap[mapReason], mapMessage)
-			} else if readyCond.Status != corev1.ConditionTrue {
+			} else if readyCond.Status != metav1.ConditionTrue {
 				status = corev1.ConditionFalse
 				numNotReady++
 				infraReadyCond := findMachineStatusCondition(machine, string(capiv1.InfrastructureReadyCondition))
@@ -727,7 +767,7 @@ func (r *NodePoolReconciler) setAllMachinesReadyCondition(nodePool *hyperv1.Node
 				//		status: "False"
 				//		type: Ready
 				var mapReason, mapMessage string
-				if infraReadyCond != nil && infraReadyCond.Status != corev1.ConditionTrue && !isSetupCounterCondMessage.MatchString(infraReadyCond.Message) {
+				if infraReadyCond != nil && infraReadyCond.Status != metav1.ConditionTrue && !isSetupCounterCondMessage.MatchString(infraReadyCond.Message) {
 					mapReason = infraReadyCond.Reason
 					mapMessage = fmt.Sprintf("Machine %s: %s: %s\n", machine.Name, infraReadyCond.Reason, infraReadyCond.Message)
 				} else {
@@ -840,7 +880,6 @@ func (r *NodePoolReconciler) setCIDRConflictCondition(ctx context.Context, nodeP
 	if len(messages) > 0 {
 		message := ""
 		for _, entry := range messages {
-
 			if len(message) == 0 {
 				message = entry
 			} else if len(entry)+len(message) < maxMessageLength {
@@ -981,10 +1020,53 @@ func (r NodePoolReconciler) validPlatformConfigCondition(ctx context.Context, no
 			condition.Reason = hyperv1.AWSErrorReason
 			condition.Message = err.Error()
 		}
+	case hyperv1.KubevirtPlatform:
+		if err := r.validateKubevirtAdditionalNetworkNamespaces(nodePool, hc); err != nil {
+			condition.Status = corev1.ConditionFalse
+			condition.Reason = hyperv1.NodePoolValidationFailedReason
+			condition.Message = err.Error()
+		}
 	}
 
 	SetStatusCondition(&nodePool.Status.Conditions, *condition)
 	return nil, nil
+}
+
+// validateKubevirtAdditionalNetworkNamespaces checks that each additionalNetworks entry
+// references a NAD in the namespace where virt-launcher pods will run, or in "default".
+// With Multus namespace isolation enabled (OpenShift default), pods cannot reference NADs
+// in other namespaces.
+func (r NodePoolReconciler) validateKubevirtAdditionalNetworkNamespaces(nodePool *hyperv1.NodePool, hc *hyperv1.HostedCluster) error {
+	kvPlatform := nodePool.Spec.Platform.Kubevirt
+	if kvPlatform == nil || len(kvPlatform.AdditionalNetworks) == 0 {
+		return nil
+	}
+
+	infraNS := manifests.HostedControlPlaneNamespace(hc.Namespace, hc.Name)
+	if hc.Spec.Platform.Kubevirt != nil &&
+		hc.Spec.Platform.Kubevirt.Credentials != nil &&
+		len(hc.Spec.Platform.Kubevirt.Credentials.InfraNamespace) > 0 {
+		infraNS = hc.Spec.Platform.Kubevirt.Credentials.InfraNamespace
+	}
+
+	for _, network := range kvPlatform.AdditionalNetworks {
+		parts := strings.SplitN(network.Name, "/", 2)
+		// Bare names (no "/") are skipped because Multus resolves them in the pod's
+		// own namespace, which is already the virt-launcher namespace.
+		if len(parts) != 2 {
+			continue
+		}
+		nadNamespace := parts[0]
+		// "default" is always in Multus globalNamespaces on OCP.
+		if nadNamespace != infraNS && nadNamespace != "default" {
+			return fmt.Errorf(
+				"additionalNetwork %q references namespace %q, but virt-launcher pods run in namespace %q; "+
+					"with Multus namespace isolation (OpenShift default), this is likely to be rejected. "+
+					"Create the NetworkAttachmentDefinition in namespace %q or %q",
+				network.Name, nadNamespace, infraNS, infraNS, "default")
+		}
+	}
+	return nil
 }
 
 func (r *NodePoolReconciler) supportedVersionSkewCondition(ctx context.Context, nodePool *hyperv1.NodePool, hcluster *hyperv1.HostedCluster) (*ctrl.Result, error) {

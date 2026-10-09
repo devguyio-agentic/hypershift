@@ -1,9 +1,14 @@
 package gcp
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	. "github.com/onsi/gomega"
@@ -13,6 +18,13 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iam/v1"
 )
+
+// timeoutError simulates net/http's unexported tlsHandshakeTimeoutError.
+type timeoutError string
+
+func (e timeoutError) Error() string   { return string(e) }
+func (e timeoutError) Timeout() bool   { return true }
+func (e timeoutError) Temporary() bool { return true }
 
 func TestIAMManagerFormatServiceAccountMethods(t *testing.T) {
 	manager := &IAMManager{
@@ -28,25 +40,25 @@ func TestIAMManagerFormatServiceAccountMethods(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "When formatServiceAccountID is called it should return correct ID",
+			name:     "When formatServiceAccountID is called, it should return correct ID",
 			method:   manager.formatServiceAccountID,
 			arg:      "nodepool-mgmt",
 			expected: "test-infra-nodepool-mgmt",
 		},
 		{
-			name:     "When formatServiceAccountEmail is called it should return correct email",
+			name:     "When formatServiceAccountEmail is called, it should return correct email",
 			method:   manager.formatServiceAccountEmail,
 			arg:      "nodepool-mgmt",
 			expected: "test-infra-nodepool-mgmt@test-project.iam.gserviceaccount.com",
 		},
 		{
-			name:     "When formatServiceAccountResource is called it should return correct resource path",
+			name:     "When formatServiceAccountResource is called, it should return correct resource path",
 			method:   manager.formatServiceAccountResource,
 			arg:      "test-infra-nodepool-mgmt@test-project.iam.gserviceaccount.com",
 			expected: "projects/test-project/serviceAccounts/test-infra-nodepool-mgmt@test-project.iam.gserviceaccount.com",
 		},
 		{
-			name:     "When formatServiceAccountMember is called it should return correct member format",
+			name:     "When formatServiceAccountMember is called, it should return correct member format",
 			method:   manager.formatServiceAccountMember,
 			arg:      "test-infra-nodepool-mgmt@test-project.iam.gserviceaccount.com",
 			expected: "serviceAccount:test-infra-nodepool-mgmt@test-project.iam.gserviceaccount.com",
@@ -75,13 +87,13 @@ func TestIAMManagerFormatWIFPrincipal(t *testing.T) {
 		expected  string
 	}{
 		{
-			name:      "When formatWIFPrincipal is called with kube-system namespace it should return correct principal",
+			name:      "When formatWIFPrincipal is called with kube-system namespace, it should return correct principal",
 			namespace: "kube-system",
 			saName:    "control-plane-operator",
 			expected:  "principal://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/test-infra-wi-pool/subject/system:serviceaccount:kube-system:control-plane-operator",
 		},
 		{
-			name:      "When formatWIFPrincipal is called with custom namespace it should return correct principal",
+			name:      "When formatWIFPrincipal is called with custom namespace, it should return correct principal",
 			namespace: "openshift-cloud-controller-manager",
 			saName:    "cloud-controller-manager",
 			expected:  "principal://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/test-infra-wi-pool/subject/system:serviceaccount:openshift-cloud-controller-manager:cloud-controller-manager",
@@ -104,13 +116,13 @@ func TestIAMManagerFormatIssuerUri(t *testing.T) {
 		expected      string
 	}{
 		{
-			name:          "When custom OIDC issuer URL is set it should return the custom URL",
+			name:          "When custom OIDC issuer URL is set, it should return the custom URL",
 			oidcIssuerURL: "https://custom-oidc.example.com",
 			infraID:       "test-infra",
 			expected:      "https://custom-oidc.example.com",
 		},
 		{
-			name:          "When no custom OIDC issuer URL is set it should derive from infraID",
+			name:          "When no custom OIDC issuer URL is set, it should derive from infraID",
 			oidcIssuerURL: "",
 			infraID:       "test-infra",
 			expected:      "https://hypershift-test-infra-oidc",
@@ -397,38 +409,53 @@ func TestIsTransientIAMError(t *testing.T) {
 		expected bool
 	}{
 		{
-			name:     "When error is nil it should return false",
+			name:     "When error is nil, it should return false",
 			err:      nil,
 			expected: false,
 		},
 		{
-			name:     "When error is a 429 rate limit error it should return true",
-			err:      &googleapi.Error{Code: 429, Message: "A quota has been reached"},
-			expected: true,
-		},
-		{
-			name:     "When error is a 404 not found error it should return true",
+			name:     "When error is a 404 not found error, it should return true",
 			err:      &googleapi.Error{Code: 404, Message: "Not found"},
 			expected: true,
 		},
 		{
-			name:     "When error is a 403 permission error it should return true",
+			name:     "When error is a 403 permission error, it should return true",
 			err:      &googleapi.Error{Code: 403, Message: "Permission denied"},
 			expected: true,
 		},
 		{
-			name:     "When error is a 403 non-permission error it should return false",
+			name:     "When error is a 403 non-permission error, it should return false",
 			err:      &googleapi.Error{Code: 403, Message: "Forbidden"},
 			expected: false,
 		},
 		{
-			name:     "When error is a 500 server error it should return false",
+			name:     "When error is a 400 IAM error, it should return true",
+			err:      &googleapi.Error{Code: 400, Message: "Service account does not exist"},
+			expected: true,
+		},
+		{
+			name:     "When error is a 400 non-IAM error, it should return false",
+			err:      &googleapi.Error{Code: 400, Message: "Invalid argument"},
+			expected: false,
+		},
+		{
+			name:     "When error is a 429 rate limit error, it should return false",
+			err:      &googleapi.Error{Code: 429, Message: "Rate limited"},
+			expected: false,
+		},
+		{
+			name:     "When error is a 500 server error, it should return false",
 			err:      &googleapi.Error{Code: 500, Message: "Internal server error"},
 			expected: false,
 		},
 		{
-			name:     "When error is a non-googleapi error it should return false",
+			name:     "When error is a non-googleapi error, it should return false",
 			err:      fmt.Errorf("some other error"),
+			expected: false,
+		},
+		{
+			name:     "When error is a network error, it should return false",
+			err:      &net.OpError{Op: "read", Net: "tcp", Err: fmt.Errorf("connection reset by peer")},
 			expected: false,
 		},
 	}
@@ -441,6 +468,302 @@ func TestIsTransientIAMError(t *testing.T) {
 	}
 }
 
+func TestIsTransientError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "When error is nil, it should return false",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "When error is a 429 rate limit error, it should return true",
+			err:      &googleapi.Error{Code: 429, Message: "Rate limited"},
+			expected: true,
+		},
+		{
+			name:     "When error is a 500 server error, it should return true",
+			err:      &googleapi.Error{Code: 500, Message: "Internal server error"},
+			expected: true,
+		},
+		{
+			name:     "When error is a 502 bad gateway error, it should return true",
+			err:      &googleapi.Error{Code: 502, Message: "Bad gateway"},
+			expected: true,
+		},
+		{
+			name:     "When error is a 503 service unavailable error, it should return true",
+			err:      &googleapi.Error{Code: 503, Message: "Service unavailable"},
+			expected: true,
+		},
+		{
+			name:     "When error is a 504 gateway timeout error, it should return true",
+			err:      &googleapi.Error{Code: 504, Message: "Gateway timeout"},
+			expected: true,
+		},
+		{
+			name:     "When error is a transient network error, it should return true",
+			err:      &net.OpError{Op: "read", Net: "tcp", Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET}},
+			expected: true,
+		},
+		{
+			name:     "When error is a 404 not found error, it should return false",
+			err:      &googleapi.Error{Code: 404, Message: "Not found"},
+			expected: false,
+		},
+		{
+			name:     "When error is a non-retryable error, it should return false",
+			err:      fmt.Errorf("some other error"),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			g.Expect(isTransientError(tt.err)).To(Equal(tt.expected))
+		})
+	}
+}
+
+func TestIsTransientNetworkError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "When error is nil, it should return false",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name: "When error is a connection reset by peer, it should return true",
+			err: &net.OpError{
+				Op:  "read",
+				Net: "tcp",
+				Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET},
+			},
+			expected: true,
+		},
+		{
+			name: "When error is network unreachable, it should return true",
+			err: &net.OpError{
+				Op:  "dial",
+				Net: "tcp",
+				Err: &os.SyscallError{Syscall: "connect", Err: syscall.ENETUNREACH},
+			},
+			expected: true,
+		},
+		{
+			name:     "When error wraps a transient net.OpError, it should return true",
+			err:      fmt.Errorf("failed to get IAM policy: %w", &net.OpError{Op: "read", Net: "tcp", Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET}}),
+			expected: true,
+		},
+		{
+			name:     "When error is a DNS not found, it should return false",
+			err:      &net.DNSError{Err: "no such host", Name: "example.com", IsNotFound: true},
+			expected: false,
+		},
+		{
+			name:     "When error is a temporary DNS error, it should return true",
+			err:      &net.DNSError{Err: "temporary failure", Name: "example.com", IsTemporary: true},
+			expected: true,
+		},
+		{
+			name:     "When error is a DNS timeout, it should return true",
+			err:      &net.DNSError{Err: "timeout", Name: "example.com", IsTimeout: true},
+			expected: true,
+		},
+		{
+			name:     "When error is connection refused, it should return true",
+			err:      &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}},
+			expected: true,
+		},
+		{
+			name:     "When error is host unreachable, it should return true",
+			err:      &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.EHOSTUNREACH}},
+			expected: true,
+		},
+		{
+			name:     "When error is a syscall timeout, it should return true",
+			err:      &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ETIMEDOUT}},
+			expected: true,
+		},
+		{
+			name:     "When error is connection aborted, it should return true",
+			err:      &net.OpError{Op: "read", Net: "tcp", Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNABORTED}},
+			expected: true,
+		},
+		{
+			name:     "When error is a broken pipe, it should return true",
+			err:      &net.OpError{Op: "write", Net: "tcp", Err: &os.SyscallError{Syscall: "write", Err: syscall.EPIPE}},
+			expected: true,
+		},
+		{
+			name:     "When error is io.ErrUnexpectedEOF, it should return true",
+			err:      io.ErrUnexpectedEOF,
+			expected: true,
+		},
+		{
+			name:     "When error is io.EOF, it should return true",
+			err:      io.EOF,
+			expected: true,
+		},
+		{
+			name:     "When error is a url.Error wrapping a transient error, it should return true",
+			err:      &url.Error{Op: "Post", URL: "https://iam.googleapis.com", Err: &net.OpError{Op: "read", Net: "tcp", Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET}}},
+			expected: true,
+		},
+		{
+			name:     "When error is a net.Error with Timeout, it should return true",
+			err:      timeoutError("net/http: TLS handshake timeout"),
+			expected: true,
+		},
+		{
+			name:     "When error is an address error, it should return false",
+			err:      &net.AddrError{Err: "invalid address", Addr: "not-a-host"},
+			expected: false,
+		},
+		{
+			name:     "When error is a non-network error, it should return false",
+			err:      fmt.Errorf("some other error"),
+			expected: false,
+		},
+		{
+			name:     "When error is an IAM API error, it should return false",
+			err:      &googleapi.Error{Code: 400, Message: "Service account does not exist"},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			g.Expect(isTransientNetworkError(tt.err)).To(Equal(tt.expected))
+		})
+	}
+}
+
+func TestIsRetryableIAMError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "When error is nil, it should return false",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "When error is a transient IAM error (404), it should return true",
+			err:      &googleapi.Error{Code: 404, Message: "Not found"},
+			expected: true,
+		},
+		{
+			name:     "When error is a transient server error (429), it should return true",
+			err:      &googleapi.Error{Code: 429, Message: "Rate limited"},
+			expected: true,
+		},
+		{
+			name:     "When error is a 504 gateway timeout, it should return true",
+			err:      &googleapi.Error{Code: 504, Message: "Gateway timeout"},
+			expected: true,
+		},
+		{
+			name:     "When error is a transient network error, it should return true",
+			err:      &net.OpError{Op: "read", Net: "tcp", Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET}},
+			expected: true,
+		},
+		{
+			name:     "When error is neither IAM nor network, it should return false",
+			err:      fmt.Errorf("some other error"),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			g.Expect(isRetryableIAMError(tt.err)).To(Equal(tt.expected))
+		})
+	}
+}
+
+func TestRetryWithExponentialBackoff(t *testing.T) {
+	manager := &IAMManager{logger: logr.Discard()}
+
+	t.Run("When operation returns a non-retryable error, it should run once and propagate the error", func(t *testing.T) {
+		g := NewWithT(t)
+		calls := 0
+		permanentErr := fmt.Errorf("permanent failure")
+
+		err := manager.retryWithExponentialBackoff(context.Background(), "test-op", isTransientError, func() error {
+			calls++
+			return permanentErr
+		})
+
+		g.Expect(err).To(MatchError(permanentErr))
+		g.Expect(calls).To(Equal(1))
+	})
+
+	t.Run("When operation returns a transient error then succeeds, it should retry and return nil", func(t *testing.T) {
+		g := NewWithT(t)
+		calls := 0
+		transientErr := &net.OpError{
+			Op:  "read",
+			Net: "tcp",
+			Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET},
+		}
+
+		err := manager.retryWithExponentialBackoff(context.Background(), "test-op", isTransientError, func() error {
+			calls++
+			if calls == 1 {
+				return transientErr
+			}
+			return nil
+		})
+
+		g.Expect(err).To(BeNil())
+		g.Expect(calls).To(Equal(2))
+	})
+
+	t.Run("When context is canceled, it should stop retrying", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		calls := 0
+		transientErr := &googleapi.Error{Code: 429, Message: "Rate limited"}
+
+		cancel()
+
+		err := manager.retryWithExponentialBackoff(ctx, "test-op", isRetryableIAMError, func() error {
+			calls++
+			return transientErr
+		})
+
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(calls).To(Equal(1))
+	})
+
+	t.Run("When using isTransientError, a 404 should not be retried", func(t *testing.T) {
+		g := NewWithT(t)
+		calls := 0
+		notFoundErr := &googleapi.Error{Code: 404, Message: "Project not found"}
+
+		err := manager.retryWithExponentialBackoff(context.Background(), "test-op", isTransientError, func() error {
+			calls++
+			return notFoundErr
+		})
+
+		g.Expect(err).To(MatchError(notFoundErr))
+		g.Expect(calls).To(Equal(1))
+	})
+}
+
 func TestIsAlreadyExistsError(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -448,7 +771,7 @@ func TestIsAlreadyExistsError(t *testing.T) {
 		expected bool
 	}{
 		{
-			name:     "When error is nil it should return false",
+			name:     "When error is nil, it should return false",
 			err:      nil,
 			expected: false,
 		},
@@ -536,55 +859,55 @@ func TestCompareJWKS(t *testing.T) {
 		expected bool
 	}{
 		{
-			name:     "When both are empty it should return true",
+			name:     "When both are empty, it should return true",
 			jwks1:    "",
 			jwks2:    "",
 			expected: true,
 		},
 		{
-			name:     "When both are whitespace-only it should return true",
+			name:     "When both are whitespace-only, it should return true",
 			jwks1:    "  ",
 			jwks2:    "  \t ",
 			expected: true,
 		},
 		{
-			name:     "When first is empty and second is not it should return false",
+			name:     "When first is empty and second is not, it should return false",
 			jwks1:    "",
 			jwks2:    `{"keys": []}`,
 			expected: false,
 		},
 		{
-			name:     "When first is non-empty and second is empty it should return false",
+			name:     "When first is non-empty and second is empty, it should return false",
 			jwks1:    `{"keys": []}`,
 			jwks2:    "",
 			expected: false,
 		},
 		{
-			name:     "When both contain identical JSON it should return true",
+			name:     "When both contain identical JSON, it should return true",
 			jwks1:    `{"keys": [{"kty": "RSA"}]}`,
 			jwks2:    `{"keys": [{"kty": "RSA"}]}`,
 			expected: true,
 		},
 		{
-			name:     "When both contain semantically equal JSON with different formatting it should return true",
+			name:     "When both contain semantically equal JSON with different formatting, it should return true",
 			jwks1:    `{"keys":[{"kty":"RSA"}]}`,
 			jwks2:    `{ "keys" : [ { "kty" : "RSA" } ] }`,
 			expected: true,
 		},
 		{
-			name:     "When JSON content differs it should return false",
+			name:     "When JSON content differs, it should return false",
 			jwks1:    `{"keys": [{"kty": "RSA"}]}`,
 			jwks2:    `{"keys": [{"kty": "EC"}]}`,
 			expected: false,
 		},
 		{
-			name:     "When first contains invalid JSON it should return false",
+			name:     "When first contains invalid JSON, it should return false",
 			jwks1:    `{not json}`,
 			jwks2:    `{"keys": []}`,
 			expected: false,
 		},
 		{
-			name:     "When second contains invalid JSON it should return false",
+			name:     "When second contains invalid JSON, it should return false",
 			jwks1:    `{"keys": []}`,
 			jwks2:    `{not json}`,
 			expected: false,

@@ -31,12 +31,15 @@ import (
 	"github.com/openshift/hypershift/test/e2e/util"
 	"github.com/openshift/hypershift/test/e2e/v2/backuprestore"
 	"github.com/openshift/hypershift/test/e2e/v2/internal"
+
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/ptr"
+
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -63,9 +66,10 @@ const (
 )
 
 type backupRestorePlatformConfig struct {
-	excludeWorkloads     []string
-	postRestoreHook      func(testCtx *internal.TestContext) error
-	additionalNamespaces []string
+	excludeWorkloads      []string
+	postRestoreHook       func(testCtx *internal.TestContext) error
+	additionalNamespaces  []string
+	supportsHCPETCDBackup bool
 }
 
 var backupRestorePlatforms = map[hyperv1.PlatformType]backupRestorePlatformConfig{
@@ -81,6 +85,7 @@ var backupRestorePlatforms = map[hyperv1.PlatformType]backupRestorePlatformConfi
 			}
 			return backuprestore.RunFixDrOidcIam(testCtx.Context, GinkgoLogr.WithName("backup-restore"), testCtx.ArtifactDir, fixOpts)
 		},
+		supportsHCPETCDBackup: true,
 	},
 	hyperv1.AgentPlatform: {
 		excludeWorkloads: []string{"router", "karpenter", "karpenter-operator", "cloud-network-config-controller"},
@@ -94,8 +99,9 @@ var backupRestorePlatforms = map[hyperv1.PlatformType]backupRestorePlatformConfi
 		postRestoreHook:  nil,
 	},
 	hyperv1.AzurePlatform: {
-		excludeWorkloads: []string{"router", "karpenter", "karpenter-operator"},
-		postRestoreHook:  nil,
+		excludeWorkloads:      []string{"router", "karpenter", "karpenter-operator"},
+		postRestoreHook:       nil,
+		supportsHCPETCDBackup: true,
 	},
 }
 
@@ -113,8 +119,8 @@ var _ = Describe("[sig-hypershift][Jira:Hypershift][Feature:BackupRestore] Backu
 	BeforeAll(func() {
 		testCtx = internal.GetTestContext()
 		Expect(testCtx).NotTo(BeNil())
-		hostedCluster := testCtx.GetHostedCluster()
-		Expect(hostedCluster).NotTo(BeNil(), "HostedCluster should be set up")
+		hostedCluster, err := testCtx.GetHostedCluster()
+		Expect(err).NotTo(HaveOccurred())
 		cfg, supported := backupRestorePlatforms[hostedCluster.Spec.Platform.Type]
 		if !supported {
 			Skip(fmt.Sprintf("Backup/restore test not supported on platform %s", hostedCluster.Spec.Platform.Type))
@@ -177,7 +183,9 @@ var _ = Describe("[sig-hypershift][Jira:Hypershift][Feature:BackupRestore] Backu
 
 	Context(ContextBackup, func() {
 		It("should create backup and schedule successfully", func() {
-			if testCtx.GetHostedCluster().Spec.Platform.Type == hyperv1.AgentPlatform {
+			hc, err := testCtx.GetHostedCluster()
+			Expect(err).NotTo(HaveOccurred())
+			if hc.Spec.Platform.Type == hyperv1.AgentPlatform {
 				By("Pausing AgentMachine and AgentCluster CRs")
 				err := backuprestore.PauseAgentCAPIResources(testCtx, GinkgoLogr.WithName("backup-restore"))
 				Expect(err).NotTo(HaveOccurred())
@@ -187,6 +195,10 @@ var _ = Describe("[sig-hypershift][Jira:Hypershift][Feature:BackupRestore] Backu
 					}
 				})
 			}
+
+			By("Waiting for BackupStorageLocation to be Available")
+			err = backuprestore.WaitForBackupStorageLocationAvailable(testCtx, testCtx.ClusterName)
+			Expect(err).NotTo(HaveOccurred())
 
 			// Create schedule first to test parallel execution of backup and schedule and
 			// to speed up the test execution.
@@ -199,8 +211,9 @@ var _ = Describe("[sig-hypershift][Jira:Hypershift][Feature:BackupRestore] Backu
 				HCNamespace:       testCtx.ClusterNamespace,
 				StorageLocation:   testCtx.ClusterName,
 				IncludeNamespaces: platformCfg.additionalNamespaces,
+				SnapshotMoveData:  ptr.To(true),
 			}
-			err := backuprestore.RunOADPSchedule(testCtx.Context, GinkgoLogr.WithName("backup-restore"), testCtx.ArtifactDir, scheduleOpts)
+			err = backuprestore.RunOADPSchedule(testCtx.Context, GinkgoLogr.WithName("backup-restore"), testCtx.ArtifactDir, scheduleOpts)
 			Expect(err).NotTo(HaveOccurred())
 
 			DeferCleanup(func() {
@@ -222,6 +235,7 @@ var _ = Describe("[sig-hypershift][Jira:Hypershift][Feature:BackupRestore] Backu
 				HCNamespace:       testCtx.ClusterNamespace,
 				StorageLocation:   testCtx.ClusterName,
 				IncludeNamespaces: platformCfg.additionalNamespaces,
+				SnapshotMoveData:  ptr.To(true),
 			}
 			err = backuprestore.RunOADPBackup(testCtx.Context, GinkgoLogr.WithName("backup-restore"), testCtx.ArtifactDir, backupOpts)
 			Expect(err).NotTo(HaveOccurred())
@@ -230,8 +244,8 @@ var _ = Describe("[sig-hypershift][Jira:Hypershift][Feature:BackupRestore] Backu
 			err = backuprestore.WaitForBackupCompletion(testCtx, backupName)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Waiting for schedule to have one backup completed")
-			err = backuprestore.WaitForScheduleCompletion(testCtx, scheduleName)
+			By("Waiting for schedule to create a backup")
+			err = backuprestore.WaitForScheduleBackupCreated(testCtx, scheduleName)
 			Expect(err).NotTo(HaveOccurred())
 
 		})
@@ -282,7 +296,9 @@ var _ = Describe("[sig-hypershift][Jira:Hypershift][Feature:BackupRestore] Backu
 	Context(ContextPostRestoreControlPlane, func() {
 		It("should have control plane healthy after restore", func() {
 			// TODO(mgencur): Remove this condition once https://redhat.atlassian.net/browse/MGMT-23509 is fixed
-			skipNodePoolValidation := testCtx.GetHostedCluster().Spec.Platform.Type == hyperv1.AgentPlatform
+			hc, err := testCtx.GetHostedCluster()
+			Expect(err).NotTo(HaveOccurred())
+			skipNodePoolValidation := hc.Spec.Platform.Type == hyperv1.AgentPlatform
 			validatePostRestoreControlPlane(testCtx, platformCfg.excludeWorkloads, expectedConditions, skipNodePoolValidation)
 		})
 	})
@@ -307,8 +323,6 @@ func getNodePool(testCtx *internal.TestContext) (*hyperv1.NodePool, error) {
 }
 
 func validateBeforeEach(testCtx *internal.TestContext) {
-	testCtx.ValidateHostedCluster()
-
 	err := backuprestore.EnsureVeleroPodRunning(testCtx)
 	if err != nil {
 		Fail(fmt.Sprintf("Velero is not running: %v", err))
@@ -393,16 +407,19 @@ var _ = Describe("[sig-hypershift][Jira:Hypershift][Feature:EtcdSnapshot] Backup
 	BeforeAll(func() {
 		testCtx = internal.GetTestContext()
 		Expect(testCtx).NotTo(BeNil())
-		hostedCluster := testCtx.GetHostedCluster()
+		hostedCluster, err := testCtx.GetHostedCluster()
+		Expect(err).NotTo(HaveOccurred())
 		Expect(hostedCluster).NotTo(BeNil(), "HostedCluster should be set up")
-		if hostedCluster.Spec.Platform.Type != hyperv1.AWSPlatform {
-			Skip("etcd snapshot backup test only supported on AWS")
+
+		cfg, found := backupRestorePlatforms[hostedCluster.Spec.Platform.Type]
+		if !(found && cfg.supportsHCPETCDBackup) {
+			Skip(fmt.Sprintf("etcd snapshot backup test not supported on platform %s", hostedCluster.Spec.Platform.Type))
 		}
-		platformCfg = backupRestorePlatforms[hyperv1.AWSPlatform]
+		platformCfg = cfg
 
 		By("Checking if HCPEtcdBackup feature gate is enabled")
 		hcpEtcdBackupList := &hyperv1.HCPEtcdBackupList{}
-		err := testCtx.MgmtClient.List(testCtx.Context, hcpEtcdBackupList, crclient.InNamespace(testCtx.ControlPlaneNamespace))
+		err = testCtx.MgmtClient.List(testCtx.Context, hcpEtcdBackupList, crclient.InNamespace(testCtx.ControlPlaneNamespace))
 		if err != nil {
 			if meta.IsNoMatchError(err) || apierrors.IsNotFound(err) {
 				Skip("HCPEtcdBackup feature gate is not enabled (CRD not installed). " +
@@ -494,6 +511,10 @@ var _ = Describe("[sig-hypershift][Jira:Hypershift][Feature:EtcdSnapshot] Backup
 
 	Context(ContextBackup, func() {
 		It("should create backup with etcd snapshot method", func() {
+			By("Waiting for BackupStorageLocation to be Available")
+			err := backuprestore.WaitForBackupStorageLocationAvailable(testCtx, testCtx.ClusterName)
+			Expect(err).NotTo(HaveOccurred())
+
 			By("Creating backup with etcd snapshot options")
 			backupName = oadp.GenerateBackupName(
 				testCtx.ClusterName,
@@ -506,7 +527,7 @@ var _ = Describe("[sig-hypershift][Jira:Hypershift][Feature:EtcdSnapshot] Backup
 				StorageLocation: testCtx.ClusterName,
 				UseEtcdSnapshot: true,
 			}
-			err := backuprestore.RunOADPBackup(testCtx.Context, GinkgoLogr.WithName("backup-restore"), testCtx.ArtifactDir, backupOpts)
+			err = backuprestore.RunOADPBackup(testCtx.Context, GinkgoLogr.WithName("backup-restore"), testCtx.ArtifactDir, backupOpts)
 			Expect(err).NotTo(HaveOccurred())
 
 			By("Waiting for backup to complete")
@@ -585,6 +606,21 @@ var _ = Describe("[sig-hypershift][Jira:Hypershift][Feature:EtcdSnapshot] Backup
 	})
 
 	Context(ContextPostRestoreControlPlane, func() {
+		// etcd-init log verification must run before the health check. After restore,
+		// CPO clears restoreSnapshotURL which triggers a second StatefulSet rollout
+		// that replaces the pod without the etcd-init container. The poll-based
+		// function captures logs before that window closes.
+		It("should have etcd-init container logs showing successful snapshot restore", func() {
+			By("Polling for etcd-init container completion and verifying restore logs")
+			restConfig, err := util.GetConfig()
+			Expect(err).NotTo(HaveOccurred(), "failed to get REST config for pod log access")
+			kubeClient, err := kubernetes.NewForConfig(restConfig)
+			Expect(err).NotTo(HaveOccurred(), "failed to create kubernetes clientset")
+
+			err = backuprestore.WaitForEtcdInitAndVerifyLogs(testCtx.Context, GinkgoLogr.WithName("etcd-init"), kubeClient, testCtx.ControlPlaneNamespace)
+			Expect(err).NotTo(HaveOccurred(), "etcd-init container logs should confirm snapshot restore")
+		})
+
 		It("should have control plane healthy after restore", func() {
 			validatePostRestoreControlPlane(testCtx, platformCfg.excludeWorkloads, expectedConditions, false)
 		})
@@ -609,15 +645,11 @@ var _ = Describe("[sig-hypershift][Jira:Hypershift][Feature:EtcdSnapshot] Backup
 			GinkgoWriter.Printf("RestoreSnapshotURL is set on HostedCluster\n")
 		})
 
-		It("should have etcd-init container logs showing successful snapshot restore", func() {
-			By("Verifying etcd-0 init container logs for snapshot restore traces")
-			restConfig, err := util.GetConfig()
-			Expect(err).NotTo(HaveOccurred(), "failed to get REST config for pod log access")
-			kubeClient, err := kubernetes.NewForConfig(restConfig)
-			Expect(err).NotTo(HaveOccurred(), "failed to create kubernetes clientset")
-
-			err = backuprestore.VerifyEtcdInitLogs(testCtx.Context, GinkgoLogr.WithName("etcd-init"), kubeClient, testCtx.ControlPlaneNamespace)
-			Expect(err).NotTo(HaveOccurred(), "etcd-init container logs should confirm snapshot restore")
+		It("should have all etcd members in a single cluster after restore", Label(internal.InformingLabel), func() {
+			By("Verifying all etcd members form a single cluster (no split brain)")
+			err := backuprestore.VerifyEtcdClusterHealth(testCtx.Context, GinkgoLogr.WithName("etcd-cluster-health"), testCtx.MgmtClient, testCtx.ControlPlaneNamespace)
+			Expect(err).NotTo(HaveOccurred(), "all etcd members should form a single cluster after restore")
 		})
+
 	})
 })

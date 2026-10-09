@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
+	cpomanifests "github.com/openshift/hypershift/pkg/manifests/cpo"
 	"github.com/openshift/hypershift/support/api"
 	"github.com/openshift/hypershift/support/config"
 	component "github.com/openshift/hypershift/support/controlplane-component"
@@ -46,7 +46,7 @@ func getOAuthServiceDNS(namespace string) string {
 	if namespace == "" {
 		return ""
 	}
-	return manifests.OauthServerService("").Name + "." + namespace + ".svc.cluster.local"
+	return cpomanifests.OauthServerService("").Name + "." + namespace + ".svc.cluster.local"
 }
 
 func adaptAuditConfig(cpContext component.WorkloadContext, cm *corev1.ConfigMap) error {
@@ -65,7 +65,9 @@ func adaptConfigMap(cpContext component.WorkloadContext, cm *corev1.ConfigMap) e
 		return fmt.Errorf("failed to decode existing oauth server configuration: %w", err)
 	}
 
-	adaptOAuthConfig(cpContext, oauthConfig)
+	if err := adaptOAuthConfig(cpContext, oauthConfig); err != nil {
+		return err
+	}
 	serializedConfig, err := k8sutil.SerializeResource(oauthConfig, api.Scheme)
 	if err != nil {
 		return fmt.Errorf("failed to serialize oauth server configuration: %w", err)
@@ -74,13 +76,14 @@ func adaptConfigMap(cpContext component.WorkloadContext, cm *corev1.ConfigMap) e
 	return nil
 }
 
-func adaptOAuthConfig(cpContext component.WorkloadContext, cfg *osinv1.OsinServerConfig) {
+func adaptOAuthConfig(cpContext component.WorkloadContext, cfg *osinv1.OsinServerConfig) error {
 	configuration := cpContext.HCP.Spec.Configuration
 
 	cfg.GenericAPIServerConfig.ServingInfo.NamedCertificates = globalconfig.GetConfigNamedCertificates(configuration.GetNamedCertificates(), oauthNamedCertificateMountPathPrefix)
 
-	cfg.ServingInfo.MinTLSVersion = config.MinTLSVersion(configuration.GetTLSSecurityProfile())
-	cfg.ServingInfo.CipherSuites = config.CipherSuites(configuration.GetTLSSecurityProfile())
+	if err := config.ApplyServingInfoFromTLSProfile(&cfg.ServingInfo.ServingInfo, configuration.GetTLSSecurityProfile()); err != nil {
+		return err
+	}
 
 	masterUrl := (&url.URL{
 		Scheme: "https",
@@ -116,6 +119,7 @@ func adaptOAuthConfig(cpContext component.WorkloadContext, cfg *osinv1.OsinServe
 		identityProviders, _, _ := ConvertIdentityProviders(cpContext, configuration.OAuth.IdentityProviders, providerOverrides(cpContext.HCP), cpContext.Client, cpContext.HCP.Namespace)
 		cfg.OAuthConfig.IdentityProviders = identityProviders
 	}
+	return nil
 }
 
 func providerOverrides(hcp *hyperv1.HostedControlPlane) map[string]*ConfigOverride {

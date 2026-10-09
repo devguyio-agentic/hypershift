@@ -11,6 +11,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	npmetrics "github.com/openshift/hypershift/pkg/metrics/nodepool"
 	"github.com/openshift/hypershift/support/api"
 
 	ec2v2 "github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -22,7 +23,9 @@ import (
 	"k8s.io/utils/clock"
 	"k8s.io/utils/ptr"
 
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -310,9 +313,9 @@ func TestReportVCpusCountByHCluster(t *testing.T) {
 			for _, metricValue := range allMetricsValues {
 				if metricValue != nil && metricValue.Name != nil {
 					switch *metricValue.Name {
-					case VCpusCountByHClusterMetricName:
+					case npmetrics.VCpusCountByHClusterMetricName:
 						vCpusCountMetricValue = metricValue
-					case VCpusComputationErrorByHClusterMetricName:
+					case npmetrics.VCpusComputationErrorByHClusterMetricName:
 						vCpusComputationErrorMetricValue = metricValue
 					}
 				}
@@ -334,7 +337,7 @@ func TestReportVCpusCountByHCluster(t *testing.T) {
 			}
 
 			expectedVCpusCountMetricValue := &dto.MetricFamily{
-				Name: ptr.To(VCpusCountByHClusterMetricName),
+				Name: ptr.To(npmetrics.VCpusCountByHClusterMetricName),
 				Help: ptr.To(VCpusCountByHClusterMetricHelp),
 				Type: func() *dto.MetricType { v := dto.MetricType(1); return &v }(),
 				Metric: []*dto.Metric{{
@@ -345,7 +348,7 @@ func TestReportVCpusCountByHCluster(t *testing.T) {
 
 			if tc.expectedVCpusCountErrorReason != "" {
 				expectedVCpusComputationErrorMetricValue = &dto.MetricFamily{
-					Name: ptr.To(VCpusComputationErrorByHClusterMetricName),
+					Name: ptr.To(npmetrics.VCpusComputationErrorByHClusterMetricName),
 					Help: ptr.To(VCpusComputationErrorByHClusterMetricHelp),
 					Type: func() *dto.MetricType { v := dto.MetricType(1); return &v }(),
 					Metric: []*dto.Metric{{
@@ -431,6 +434,46 @@ func TestCollectConcurrency(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestCollect(t *testing.T) {
+	t.Run("When a cache read is blocked, it should stop collecting after the cache read timeout", func(t *testing.T) {
+		g := NewWithT(t)
+		var deadlineSeen bool
+		var listErr error
+
+		blockedClient := fake.NewClientBuilder().
+			WithScheme(api.Scheme).
+			WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, _ crclient.WithWatch, _ crclient.ObjectList, _ ...crclient.ListOption) error {
+					_, deadlineSeen = ctx.Deadline()
+					<-ctx.Done()
+					listErr = ctx.Err()
+					return listErr
+				},
+			}).
+			Build()
+
+		collector := createNodePoolsMetricsCollector(blockedClient, nil, clock.RealClock{}).(*nodePoolsMetricsCollector)
+		collector.cacheReadTimeout = 10 * time.Millisecond
+
+		ch := make(chan prometheus.Metric)
+		done := make(chan struct{})
+		go func() {
+			for range ch {
+			}
+			close(done)
+		}()
+
+		start := time.Now()
+		collector.Collect(ch)
+		close(ch)
+		<-done
+
+		g.Expect(deadlineSeen).To(BeTrue())
+		g.Expect(listErr).To(MatchError(context.DeadlineExceeded))
+		g.Expect(time.Since(start)).To(BeNumerically("<", time.Second))
+	})
 }
 
 // drainVCpuValue reads all metrics from a closed channel and returns the
@@ -681,9 +724,9 @@ func TestReportVCpusWithKarpenterAutoNode(t *testing.T) {
 			for _, metricValue := range allMetricsValues {
 				if metricValue != nil && metricValue.Name != nil {
 					switch *metricValue.Name {
-					case VCpusCountByHClusterMetricName:
+					case npmetrics.VCpusCountByHClusterMetricName:
 						vCpusCountMetricValue = metricValue
-					case VCpusComputationErrorByHClusterMetricName:
+					case npmetrics.VCpusComputationErrorByHClusterMetricName:
 						vCpusComputationErrorMetricValue = metricValue
 					}
 				}
@@ -697,7 +740,7 @@ func TestReportVCpusWithKarpenterAutoNode(t *testing.T) {
 			}
 
 			expectedVCpusCountMetricValue := &dto.MetricFamily{
-				Name: ptr.To(VCpusCountByHClusterMetricName),
+				Name: ptr.To(npmetrics.VCpusCountByHClusterMetricName),
 				Help: ptr.To(VCpusCountByHClusterMetricHelp),
 				Type: func() *dto.MetricType { v := dto.MetricType(1); return &v }(),
 				Metric: []*dto.Metric{{
@@ -708,7 +751,7 @@ func TestReportVCpusWithKarpenterAutoNode(t *testing.T) {
 
 			if tc.expectedVCpusCountErrorReason != "" {
 				expectedVCpusComputationErrorMetricValue = &dto.MetricFamily{
-					Name: ptr.To(VCpusComputationErrorByHClusterMetricName),
+					Name: ptr.To(npmetrics.VCpusComputationErrorByHClusterMetricName),
 					Help: ptr.To(VCpusComputationErrorByHClusterMetricHelp),
 					Type: func() *dto.MetricType { v := dto.MetricType(1); return &v }(),
 					Metric: []*dto.Metric{{

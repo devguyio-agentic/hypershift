@@ -25,8 +25,11 @@ tools/bin
 *~
 .vscode
 .envrc
+!vendor/**/.envrc
 .env
 .DS_Store
+.serena/*
+.claude/.headroom*
 
 .kube
 /kubeconfig

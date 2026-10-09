@@ -105,7 +105,7 @@ These checks only run when relevant files change:
 |------------|-------------|-----------------|
 | **Envtest OCP API Validation** | `api/`, `test/envtest/`, CRD test assets | `FAIL` with the test name — see `test/envtest/README.md` for details |
 | **Envtest Vanilla Kube API Validation** | Same as above | Same as above |
-| **Docs Build** | `docs/**` changes | MkDocs build errors — usually a broken link or YAML syntax error |
+| **Docs Build** | `docs/**` changes | Zensical build errors — usually a broken link or YAML syntax error |
 | **Validate CPO Overrides** | `hypershift-operator/controlplaneoperator-overrides/assets/overrides.yaml` changes | Validation error for the CPO overrides file |
 | **gocacheprog Tests** | `contrib/ci/gocacheprog/**` changes | `FAIL` with the test name |
 
@@ -174,13 +174,13 @@ A hosted cluster failed to come up. To find out why:
 
 Common causes:
 
-| Phase | What failed | Typical cause |
+| Stage | What failed | Typical cause |
 |-------|-------------|---------------|
-| Phase 1 | `hypershift create cluster` | Invalid flags or missing credentials |
-| Phase 2 | Platform post-create hooks | Platform-specific setup failure |
-| Phase 3 | Wait for Available | Control plane startup failure |
-| Phase 4 | Platform post-available hooks | Day-2 config transition failure |
-| Phase 5 | Version rollout | Cluster came up but couldn't roll out target version |
+| Cluster creation | `hypershift create cluster` | Invalid flags or missing credentials |
+| Platform hooks | Pre-create, post-create, or post-available setup | Platform-specific configuration or API failure |
+| Wait for Available | HostedCluster availability | Control plane startup failure |
+| Version rollout | HostedCluster or NodePool rollout | Cluster came up but could not complete the target version rollout |
+| Post-rollout hooks | Day-2 configuration after rollout | Platform-specific configuration transition failure |
 
 After identifying the error, [check the job history](#checking-prow-job-history) to determine if this is specific to your PR.
 
@@ -190,7 +190,7 @@ After identifying the error, [check the job history](#checking-prow-job-history)
 
 A test assertion failed. To find which test:
 
-1. Open the **Artifacts** tab and look for JUnit XML files (e.g., `junit_self_managed_azure_public.xml`). The failed test name and assertion message are in the XML.
+1. Open the **Artifacts** tab and look for JUnit XML files (e.g., `junit_public.xml`). The failed test name and assertion message are in the XML.
 2. Alternatively, search the `run-tests` step log for `[FAIL]` to find the Ginkgo failure output, which includes the test description, the failed assertion, and the source file and line number.
 
 After identifying the failing test, [check the job history](#checking-prow-job-history) to determine if this is specific to your PR.
@@ -213,8 +213,8 @@ Konflux checks appear as `Red Hat Konflux / <component>-on-pull-request` or `Red
 |---------------|-------------|
 | `hypershift-operator-main-on-pull-request` | Builds the hypershift-operator image via Konflux |
 | `control-plane-operator-main-on-pull-request` | Builds the control-plane-operator image |
-| `hypershift-cli-mce-50-on-pull-request` | Builds the hypershift CLI image |
-| `hypershift-release-mce-50-on-pull-request` | Builds the release image |
+| `hypershift-cli-mce-51-on-pull-request` | Builds the hypershift CLI image |
+| `hypershift-release-mce-51-on-pull-request` | Builds the release image |
 | `enterprise-contract-*` | Validates image provenance and policy compliance |
 
 Common causes:
@@ -302,4 +302,5 @@ Post in [#forum-ocp-hypershift](https://redhat.enterprise.slack.com/archives/C04
 - [Debugging CI Failures](../v2-testing/debugging.md) — Reading JUnit XML, Ginkgo output, and dump-guests artifacts
 - [V2 E2E Testing Overview](../v2-testing/index.md) — Architecture of the v2 test framework
 - [CI Pipeline Configuration](../v2-testing/ci-pipeline.md) — How presubmit jobs are configured
+- [Test Flow](../v2-testing/test-flow.md) — End-to-end CI sequence, process boundaries, and inter-process communication
 - [Daily CI Health](daily-health.md) — Monitoring periodic and presubmit job health

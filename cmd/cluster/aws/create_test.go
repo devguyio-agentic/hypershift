@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -55,27 +56,25 @@ func TestValidateCreateCredentialInfo(t *testing.T) {
 		credentials          awsutil.AWSCredentialsOptions
 		credentialSecretName string
 		pullSecretFile       string
-		kubeconfigPath       string
 		expectError          bool
 	}{
-		"when CredentialSecretName is blank and aws-creds is also blank": {
+		"When CredentialSecretName and aws-creds are blank, it should return an error": {
 			expectError: true,
 		},
-		"when CredentialSecretName is blank, aws-creds is not blank, and pull-secret is blank": {
+		"When CredentialSecretName and pull-secret are blank and aws-creds is set, it should return an error": {
 			pullSecretFile:       "",
 			credentialSecretName: "",
 			credentials:          awsutil.AWSCredentialsOptions{AWSCredentialsFile: "asdf"},
 			expectError:          true,
 		},
-		"when CredentialSecretName is blank, aws-creds is not blank, and pull-secret is not blank": {
+		"When CredentialSecretName is blank and aws-creds and pull-secret are set, it should succeed": {
 			pullSecretFile:       "asdf",
 			credentialSecretName: "",
 			credentials:          awsutil.AWSCredentialsOptions{AWSCredentialsFile: "asdf"},
 			expectError:          false,
 		},
-		"when CredentialSecretName is set with invalid kubeconfig it should fail": {
+		"When CredentialSecretName is set without a client, it should fail": {
 			credentialSecretName: "my-secret",
-			kubeconfigPath:       "/nonexistent/kubeconfig",
 			credentials:          awsutil.AWSCredentialsOptions{AWSCredentialsFile: "/some/creds"},
 			pullSecretFile:       "asdf",
 			expectError:          true,
@@ -84,7 +83,7 @@ func TestValidateCreateCredentialInfo(t *testing.T) {
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			err := ValidateCreateCredentialInfo(test.credentials, test.credentialSecretName, "", test.pullSecretFile, test.kubeconfigPath)
+			err := ValidateCreateCredentialInfo(context.Background(), test.credentials, test.credentialSecretName, "", test.pullSecretFile, nil)
 			if test.expectError {
 				g.Expect(err).To(HaveOccurred())
 			} else {
@@ -99,7 +98,6 @@ func TestCreateCluster(t *testing.T) {
 	certs.UnsafeSeed(1234567890)
 	ctx := framework.InterruptableContext(t.Context())
 	tempDir := t.TempDir()
-	t.Setenv("FAKE_CLIENT", "true")
 
 	rawCreds, err := json.Marshal(&awsutil.STSCreds{
 		Credentials: awsutil.Credentials{
@@ -180,7 +178,7 @@ func TestCreateCluster(t *testing.T) {
 		args []string
 	}{
 		{
-			name: "minimal flags necessary to render",
+			name: "When minimal flags are provided, it should render successfully",
 			args: []string{
 				"--sts-creds=" + credentialsFile,
 				"--infra-json=" + infraFile,
@@ -192,7 +190,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "default creation flags for cesar",
+			name: "When default creation flags are provided, it should create cluster with expected configuration",
 			args: []string{
 				"--pull-secret=" + pullSecretFile,
 				"--name=example",
@@ -215,7 +213,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "minimal with KubeAPIServerDNSName",
+			name: "When KubeAPIServerDNSName is provided, it should configure custom DNS name",
 			args: []string{
 				"--name=example",
 				"--sts-creds=" + credentialsFile,
@@ -227,7 +225,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "minimal with OVNKubernetesMTU",
+			name: "When OVNKubernetesMTU is provided, it should configure custom MTU",
 			args: []string{
 				"--name=example",
 				"--sts-creds=" + credentialsFile,
@@ -255,7 +253,7 @@ func TestCreateCluster(t *testing.T) {
 			coreOpts.Render = true
 			coreOpts.RenderInto = manifestsFile
 
-			if err := core.CreateCluster(ctx, coreOpts, awsOpts); err != nil {
+			if err := core.CreateCluster(ctx, coreOpts, awsOpts, nil); err != nil {
 				t.Fatalf("failed to create cluster: %v", err)
 			}
 

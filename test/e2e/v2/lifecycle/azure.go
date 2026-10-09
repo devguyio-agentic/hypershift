@@ -10,12 +10,15 @@ import (
 	"path/filepath"
 	"strings"
 
-	operatorv1 "github.com/openshift/api/operator/v1"
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	e2eutil "github.com/openshift/hypershift/test/e2e/util"
 	v2util "github.com/openshift/hypershift/test/e2e/v2/util"
+
+	operatorv1 "github.com/openshift/api/operator/v1"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -110,43 +113,59 @@ func (a *AzurePlatformConfig) DefaultBaseDomain() string {
 }
 
 func (a *AzurePlatformConfig) ClusterSpecs(releaseImage, n1Image string) []ClusterSpec {
+	// Parse EXTRA_ARGS from environment if provided
+	var extraArgs []string
+	if envArgs := os.Getenv("EXTRA_ARGS"); envArgs != "" {
+		extraArgs = strings.Fields(envArgs)
+	}
+
 	var publicExtraArgs []string
 	if a.encryptionKeyID != "" {
 		publicExtraArgs = append(publicExtraArgs, "--encryption-key-id="+a.encryptionKeyID)
 	}
+	publicExtraArgs = append(publicExtraArgs, extraArgs...)
+
+	oneInitialReplica := 1
+	twoInitialReplicas := 2
 
 	return []ClusterSpec{
 		{
-			Variant:    "public",
-			OutputFile: "cluster-name-public",
-			ExtraArgs:  publicExtraArgs,
+			Variant:                 "public",
+			ExtraArgs:               publicExtraArgs,
+			InitialNodePoolReplicas: &twoInitialReplicas,
 		},
 		{
-			Variant:    "private",
-			OutputFile: "cluster-name-private",
-			ExtraArgs: []string{
+			Variant:                 "private",
+			InitialNodePoolReplicas: &oneInitialReplica,
+			ExtraArgs: append([]string{
 				"--endpoint-access=Private",
 				"--endpoint-access-private-nat-subnet-id=" + a.privateNATSubnetID,
-			},
+			}, extraArgs...),
 		},
 		{
-			Variant:    "oauth-lb",
-			OutputFile: "cluster-name-oauth-lb",
-			ExtraArgs:  []string{"--oauth-publishing-strategy=LoadBalancer"},
+			Variant:                 "oauth-lb",
+			InitialNodePoolReplicas: &oneInitialReplica,
+			ExtraArgs:               append([]string{"--oauth-publishing-strategy=LoadBalancer"}, extraArgs...),
 		},
 		{
-			Variant:      "upgrade",
-			OutputFile:   "cluster-name-upgrade",
-			ReleaseImage: n1Image,
-			ExtraArgs:    []string{"--control-plane-availability-policy=HighlyAvailable"},
+			Variant:                 "oauth-lb-private",
+			InitialNodePoolReplicas: &oneInitialReplica,
+			ExtraArgs: append([]string{
+				"--endpoint-access=Private",
+				"--endpoint-access-private-nat-subnet-id=" + a.privateNATSubnetID,
+				"--oauth-publishing-strategy=LoadBalancer",
+			}, extraArgs...),
 		},
 		{
-			Variant:    "autoscaling",
-			OutputFile: "cluster-name-autoscaling",
+			Variant:                 "upgrade",
+			ReleaseImage:            n1Image,
+			InitialNodePoolReplicas: &twoInitialReplicas,
+			ExtraArgs:               append([]string{"--control-plane-availability-policy=HighlyAvailable"}, extraArgs...),
 		},
 		{
-			Variant:    "external-oidc",
-			OutputFile: "cluster-name-external-oidc",
+			Variant:                 "external-oidc",
+			InitialNodePoolReplicas: &oneInitialReplica,
+			ExtraArgs:               extraArgs,
 		},
 	}
 }
@@ -191,7 +210,7 @@ func (a *AzurePlatformConfig) PreCreate(ctx context.Context, cl crclient.WithWat
 // PostCreate runs variant-specific post-creation hooks for each cluster
 // that was created by the lifecycle orchestrator.
 func (a *AzurePlatformConfig) PostCreate(ctx context.Context, cl crclient.WithWatch, namespace string, clusterNames map[string]string) error {
-	if publicName, ok := clusterNames["cluster-name-public"]; ok {
+	if publicName, ok := clusterNames["public"]; ok {
 		if err := a.postCreatePublic(ctx, cl, namespace, publicName); err != nil {
 			return err
 		}
@@ -211,7 +230,7 @@ func (a *AzurePlatformConfig) PostAvailable(ctx context.Context, cl crclient.Wit
 }
 
 func (a *AzurePlatformConfig) PostVersionRollout(ctx context.Context, cl crclient.WithWatch, namespace string, clusterNames map[string]string) error {
-	if oidcName, ok := clusterNames["cluster-name-external-oidc"]; ok {
+	if oidcName, ok := clusterNames["external-oidc"]; ok {
 		if err := a.postCreateExternalOIDC(ctx, cl, namespace, oidcName); err != nil {
 			return err
 		}
@@ -327,57 +346,109 @@ func (a *AzurePlatformConfig) postCreateExternalOIDC(ctx context.Context, cl crc
 	return nil
 }
 
-func (a *AzurePlatformConfig) TestMatrix(releaseImage string) TestMatrix {
+func (a *AzurePlatformConfig) DefaultTestPlan() TestPlan {
+	return TestPlan{
+		Name:       "azure-full",
+		Platform:   "azure",
+		TestMatrix: a.TestMatrix(),
+	}
+}
+
+func (a *AzurePlatformConfig) TestMatrix() TestMatrix {
 	return TestMatrix{
 		Parallel: []TestGroup{
 			{
-				Name:        "public",
-				ClusterFile: "cluster-name-public",
-				LabelFilter: "self-managed-azure-public || nodepool-lifecycle || secret-encryption || control-plane-workloads || hosted-cluster-security",
-				Skip:        "KAS allowed CIDRs",
-				JUnitFile:   "junit_self_managed_azure_public.xml",
-			},
-			{
 				Name:        "private",
-				ClusterFile: "cluster-name-private",
-				LabelFilter: "self-managed-azure-private || hosted-cluster-compliance || nodepool-osimagestream",
-				JUnitFile:   "junit_self_managed_azure_private.xml",
+				Variant:     "private",
+				LabelFilter: "self-managed-azure-private || hosted-cluster-compliance",
 			},
 			{
-				Name:        "oauth-lb",
-				ClusterFile: "cluster-name-oauth-lb",
-				LabelFilter: "self-managed-azure-oauth-lb || hosted-cluster-health || hosted-cluster-metrics || hosted-cluster-image-registry",
-				JUnitFile:   "junit_self_managed_azure_oauth_lb.xml",
-			},
-			{
-				Name:        "autoscaling",
-				ClusterFile: "cluster-name-autoscaling",
-				LabelFilter: "nodepool-autoscaling",
-				JUnitFile:   "junit_nodepool_autoscaling.xml",
-			},
-			{
-				Name:        "external-oidc",
-				ClusterFile: "cluster-name-external-oidc",
-				LabelFilter: "external-oidc",
-				JUnitFile:   "junit_self_managed_azure_external_oidc.xml",
+				Name:        "oauth-lb-private",
+				Variant:     "oauth-lb-private",
+				LabelFilter: "self-managed-azure-oauth-lb-private",
 			},
 		},
 		Sequential: []SequentialGroup{
+			{
+				Name: "public",
+				Steps: []TestGroup{
+					{
+						Name:        "public",
+						Variant:     "public",
+						LabelFilter: "self-managed-azure-public || hosted-cluster-node-communication || hosted-cluster-cpo || nodepool-arm64 || secret-encryption || control-plane-workloads || hosted-cluster-security || nodepool-osimagestream || hosted-cluster-ingress",
+						Skip:        "KAS allowed CIDRs",
+					},
+					{
+						Name:    "public-nodepool-rollouts",
+						Variant: "public",
+						LabelFilter: "nodepool-vm-size-rollout || nodepool-replace-version-upgrade || nodepool-inplace-version-upgrade || " +
+							"nodepool-n1-release || nodepool-n2-release || nodepool-auto-repair || nodepool-disk-encryption || nodepool-osimagestream-upgrade",
+					},
+				},
+			},
+			{
+				Name: "oauth-lb",
+				Steps: []TestGroup{
+					{
+						Name:        "oauth-lb",
+						Variant:     "oauth-lb",
+						LabelFilter: "self-managed-azure-oauth-lb || hosted-cluster-health || hosted-cluster-metrics || hosted-cluster-image-registry",
+					},
+					{
+						Name:    "oauth-lb-nodepool-config",
+						Variant: "oauth-lb",
+						LabelFilter: "nodepool-nto-replace-rollout || nodepool-nto-inplace-rollout || " +
+							"nodepool-performance-profile || nodepool-mirror-config || nodepool-machineconfig-rollout",
+					},
+					{
+						Name:        "oauth-lb-autoscaling",
+						Variant:     "oauth-lb",
+						LabelFilter: "nodepool-autoscaling-balancing",
+					},
+				},
+			},
+			{
+				Name: "external-oidc",
+				Steps: []TestGroup{
+					{
+						Name:        "external-oidc",
+						Variant:     "external-oidc",
+						LabelFilter: "external-oidc || global-pull-secret",
+					},
+					{
+						Name:        "external-oidc-autoscaling",
+						Variant:     "external-oidc",
+						LabelFilter: "nodepool-autoscaling-scale-up-down",
+					},
+					{
+						Name:        "external-oidc-trust-bundle",
+						Variant:     "external-oidc",
+						LabelFilter: "nodepool-trust-bundle",
+					},
+				},
+			},
 			{
 				Name: "upgrade-and-chaos",
 				Steps: []TestGroup{
 					{
 						Name:        "upgrade",
-						ClusterFile: "cluster-name-upgrade",
+						Variant:     "upgrade",
 						LabelFilter: "control-plane-upgrade",
-						JUnitFile:   "junit_lifecycle_upgrade.xml",
-						ExtraEnv:    []string{fmt.Sprintf("E2E_LATEST_RELEASE_IMAGE=%s", releaseImage)},
+					},
+					{
+						Name:        "post-upgrade-health",
+						Variant:     "upgrade",
+						LabelFilter: "hosted-cluster-health || control-plane-workloads",
+					},
+					{
+						Name:        "control-plane-tls",
+						Variant:     "upgrade",
+						LabelFilter: "control-plane-pki-operator",
 					},
 					{
 						Name:        "etcd-chaos",
-						ClusterFile: "cluster-name-upgrade",
+						Variant:     "upgrade",
 						LabelFilter: "etcd-chaos",
-						JUnitFile:   "junit_lifecycle_etcd_chaos.xml",
 					},
 				},
 			},

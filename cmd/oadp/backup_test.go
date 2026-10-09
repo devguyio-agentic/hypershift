@@ -1,6 +1,7 @@
 package oadp
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -8,7 +9,13 @@ import (
 
 	. "github.com/onsi/gomega"
 
+	cmdutil "github.com/openshift/hypershift/cmd/util"
+
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/go-logr/logr"
 )
 
 // TestCreateOptionsDefaults verifies that the default values for CreateOptions
@@ -470,52 +477,52 @@ func TestValidateBackupName(t *testing.T) {
 		errorMsg    string
 	}{
 		{
-			name:        "Valid short name",
+			name:        "When valid short name is provided, it should pass validation",
 			backupName:  "test-backup",
 			expectError: false,
 		},
 		{
-			name:        "Valid name with numbers",
+			name:        "When valid name with numbers is provided, it should pass validation",
 			backupName:  "test-backup-123",
 			expectError: false,
 		},
 		{
-			name:        "Valid 63 character name",
+			name:        "When valid 63 character name is provided, it should pass validation",
 			backupName:  "a1234567890123456789012345678901234567890123456789012345678901b",
 			expectError: false,
 		},
 		{
-			name:        "Name too long (64 characters)",
+			name:        "When name is too long (64 characters), it should return an error",
 			backupName:  "a12345678901234567890123456789012345678901234567890123456789012b",
 			expectError: true,
 			errorMsg:    "too long (64 characters)",
 		},
 		{
-			name:        "Name with uppercase letters",
+			name:        "When name has uppercase letters, it should return an error",
 			backupName:  "Test-backup",
 			expectError: true,
 			errorMsg:    "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters",
 		},
 		{
-			name:        "Name starting with hyphen",
+			name:        "When name starts with hyphen, it should return an error",
 			backupName:  "-test-backup",
 			expectError: true,
 			errorMsg:    "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters",
 		},
 		{
-			name:        "Name ending with hyphen",
+			name:        "When name ends with hyphen, it should return an error",
 			backupName:  "test-backup-",
 			expectError: true,
 			errorMsg:    "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters",
 		},
 		{
-			name:        "Name with invalid characters",
+			name:        "When name has invalid characters, it should return an error",
 			backupName:  "test_backup",
 			expectError: true,
 			errorMsg:    "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters",
 		},
 		{
-			name:        "Empty name should be valid (auto-generation)",
+			name:        "When name is empty, it should pass validation (auto-generation)",
 			backupName:  "",
 			expectError: false,
 		},
@@ -875,4 +882,30 @@ func TestBackupCommandIncludedNamespacesFlag(t *testing.T) {
 			t.Errorf("Expected namespace %d to be '%s', got '%s'", i, expected, parsedNamespaces[i])
 		}
 	}
+}
+
+func TestRunBackupClientProvider(t *testing.T) {
+	t.Run("When no client provider is configured in normal mode, it should return a configuration error", func(t *testing.T) {
+		opts := &CreateOptions{
+			HCName:      "test-cluster",
+			HCNamespace: "clusters",
+			Render:      false,
+			Log:         logr.Discard(),
+		}
+		err := opts.RunBackup(t.Context())
+		NewWithT(t).Expect(err).To(MatchError("failed to create kubernetes client: client provider is not configured"))
+	})
+
+	t.Run("When client creation fails in render mode, it should render with the default platform", func(t *testing.T) {
+		opts := &CreateOptions{
+			HCName:      "test-cluster",
+			HCNamespace: "clusters",
+			Render:      true,
+			Log:         logr.Discard(),
+			ClientProvider: &cmdutil.ClientProvider{ControllerRuntimeClient: func(string) (crclient.Client, error) {
+				return nil, errors.New("client unavailable")
+			}},
+		}
+		NewWithT(t).Expect(opts.RunBackup(t.Context())).ToNot(HaveOccurred())
+	})
 }

@@ -7,7 +7,8 @@ import (
 	"time"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests"
+	"github.com/openshift/hypershift/hypershift-operator/featuregate"
+	"github.com/openshift/hypershift/pkg/manifests"
 	karpenterutil "github.com/openshift/hypershift/support/karpenter"
 	supportutil "github.com/openshift/hypershift/support/util"
 
@@ -111,7 +112,12 @@ func (r *secretJanitor) Reconcile(ctx context.Context, req reconcile.Request) (r
 	}
 
 	controlPlaneNamespace := manifests.HostedControlPlaneNamespace(hcluster.Namespace, hcluster.Name)
-	configGenerator, err := NewConfigGenerator(ctx, r.Client, hcluster, nodePool, releaseImage, haproxyRawConfig, controlPlaneNamespace)
+	osStreamsEnabled := featuregate.Gate().Enabled(featuregate.OSStreams)
+	resolvedRHELStream, err := GetRHELStreamForBootImage(ctx, r.Client, nodePool, releaseImage, osStreamsEnabled)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to resolve RHEL stream for boot image: %w", err)
+	}
+	configGenerator, err := NewConfigGenerator(ctx, r.Client, hcluster, nodePool, releaseImage, haproxyRawConfig, controlPlaneNamespace, resolvedRHELStream)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -126,7 +132,11 @@ func (r *secretJanitor) Reconcile(ctx context.Context, req reconcile.Request) (r
 
 	// synchronously deleting the ignition token is unsafe; we need to clean up tokens by annotating them to expire
 	synchronousCleanup := func(ctx context.Context, c client.Client, secret *corev1.Secret) error {
-		return c.Delete(ctx, secret)
+		if err := c.Delete(ctx, secret); err != nil {
+			return err
+		}
+		ctrl.LoggerFrom(ctx).Info("Deleted secret", "secret", client.ObjectKeyFromObject(secret).String())
+		return nil
 	}
 	type nodePoolSecret struct {
 		expectedName   string

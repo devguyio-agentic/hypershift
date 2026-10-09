@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	coreerrors "errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	cpomanifests "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
+	kvnetwork "github.com/openshift/hypershift/hypershift-operator/controllers/nodepool/kubevirt"
 	"github.com/openshift/hypershift/support/api"
 	"github.com/openshift/hypershift/support/backwardcompat"
 	"github.com/openshift/hypershift/support/capabilities"
@@ -48,10 +50,6 @@ type ConfigGenerator struct {
 	controlplaneNamespace string
 	// resolvedRHELStreamForBootImage is the RHEL stream name used for boot
 	// image resolution via StreamForName.
-	// TODO(CNTRLPLANE-3553): currently hardcoded to rhel-9 until the MCO
-	// can install rhel-10 OS images. Once MCO support lands, this should
-	// be set by getRHELStreamForBootImage for version-aware resolution.
-	//
 	// This field is intentionally outside rolloutConfig because it does not
 	// participate in the config hash that drives rollouts.
 	resolvedRHELStreamForBootImage string
@@ -86,7 +84,7 @@ type rolloutConfig struct {
 }
 
 // NewConfigGenerator is the contract to create a new ConfigGenerator.
-func NewConfigGenerator(ctx context.Context, client client.Client, hostedCluster *hyperv1.HostedCluster, nodePool *hyperv1.NodePool, releaseImage *releaseinfo.ReleaseImage, haproxyRawConfig string, controlPlaneNamespace string) (*ConfigGenerator, error) {
+func NewConfigGenerator(ctx context.Context, client client.Client, hostedCluster *hyperv1.HostedCluster, nodePool *hyperv1.NodePool, releaseImage *releaseinfo.ReleaseImage, haproxyRawConfig string, controlPlaneNamespace string, resolvedRHELStream string) (*ConfigGenerator, error) {
 	if client == nil {
 		return nil, fmt.Errorf("client can't be nil")
 	}
@@ -95,7 +93,7 @@ func NewConfigGenerator(ctx context.Context, client client.Client, hostedCluster
 		return nil, fmt.Errorf("release image can't be nil")
 	}
 
-	globalConfig, err := globalConfigString(hostedCluster)
+	globalConfig, err := globalConfigString(hostedCluster, releaseImage)
 	if err != nil {
 		return nil, err
 	}
@@ -124,16 +122,11 @@ func NewConfigGenerator(ctx context.Context, client client.Client, hostedCluster
 	}
 
 	cg := &ConfigGenerator{
-		Client:                client,
-		hostedCluster:         hostedCluster,
-		nodePool:              nodePool,
-		controlplaneNamespace: controlPlaneNamespace,
-		// TODO(CNTRLPLANE-3553): hardcode to rhel-9 until the MCO can install
-		// rhel-10 OS images. Otherwise NodePools pointing to a 5.x release image
-		// will boot with a rhel-10 AMI while the MCO installs rhel-9, which is a
-		// path we don't need to exercise for replace upgrades. In-place upgrades
-		// from rhel-9 to rhel-10 should have their own dedicated e2e.
-		resolvedRHELStreamForBootImage: StreamRHEL9,
+		Client:                         client,
+		hostedCluster:                  hostedCluster,
+		nodePool:                       nodePool,
+		controlplaneNamespace:          controlPlaneNamespace,
+		resolvedRHELStreamForBootImage: resolvedRHELStream,
 		rolloutConfig: &rolloutConfig{
 			releaseImage:     releaseImage,
 			pullSecretName:   hostedCluster.Spec.PullSecret.Name,
@@ -212,7 +205,53 @@ func (cg *ConfigGenerator) generateMCORawConfig(ctx context.Context, caps *hyper
 		configs = append(configs, nodeTuningGeneratedConfigs...)
 	}
 
+	// Generate platform-specific MachineConfigs.
+	platformConfigs, err := cg.getPlatformConfigs()
+	if err != nil {
+		return "", err
+	}
+	configs = append(configs, platformConfigs...)
+
 	return cg.parse(configs)
+}
+
+// getPlatformConfigs returns platform-specific MachineConfig ConfigMaps
+// based on the NodePool's platform configuration.
+func (cg *ConfigGenerator) getPlatformConfigs() ([]corev1.ConfigMap, error) {
+	var rawConfig string
+	var err error
+
+	switch cg.nodePool.Spec.Platform.Type {
+	case hyperv1.KubevirtPlatform:
+		rawConfig, err = cg.kubevirtPlatformConfig()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate platform config: %w", err)
+	}
+
+	if rawConfig == "" {
+		return nil, nil
+	}
+
+	return []corev1.ConfigMap{
+		{
+			Data: map[string]string{
+				TokenSecretConfigKey: rawConfig,
+			},
+		},
+	}, nil
+}
+
+// kubevirtPlatformConfig generates KubeVirt-specific MachineConfig content.
+// For NodePools using multus as primary network (AttachDefaultNetwork=false) on
+// clusters with IPv6 networking, it generates an override that replaces the
+// MCO-rendered nmstate files (which assume the default pod network) with no-op
+// content, allowing standard network auto-configuration (SLAAC) to work.
+// For every other NodePool nothing is generated, keeping the NodePool config
+// hash unchanged so that upgrading the HyperShift operator does not trigger a
+// rollout.
+func (cg *ConfigGenerator) kubevirtPlatformConfig() (string, error) {
+	return kvnetwork.GenerateNetworkOverrideMachineConfig(cg.nodePool, cg.hostedCluster.Spec.Networking)
 }
 
 // getUserConfigs returns a slice with all the configMaps in nodePool.Spec.Config.
@@ -376,7 +415,7 @@ func (cg *ConfigGenerator) defaultAndValidateConfigManifest(manifest []byte) ([]
 	return manifest, err
 }
 
-func globalConfigString(hcluster *hyperv1.HostedCluster) (string, error) {
+func globalConfigString(hcluster *hyperv1.HostedCluster, releaseImage *releaseinfo.ReleaseImage) (string, error) {
 	// 1. - Reconcile conditions according to current state of the world.
 	proxy := globalconfig.ProxyConfig()
 	globalconfig.ReconcileProxyConfigWithStatusFromHostedCluster(proxy, hcluster)
@@ -402,10 +441,49 @@ func globalConfigString(hcluster *hyperv1.HostedCluster) (string, error) {
 	}
 	globalConfigBytes.Write(imageBytes)
 
+	if err := conditionallyAddToGlobalConfigString(globalConfigBytes, hcluster, releaseImage); err != nil {
+		return "", fmt.Errorf("failed to encode apiserver global config: %w", err)
+	}
+
 	rawConfig := globalConfigBytes.String()
 
 	// Some fields in the ClusterConfiguration have changes that are not backwards compatible with older versions of the CPO.
 	return backwardcompat.GetBackwardCompatibleConfigString(rawConfig), nil
+}
+
+// conditionallyAddToGlobalConfigString exists so we can add things to the
+// global config string based on the release image version. Every time this
+// global config changes the node pool controller trigger a node pool
+// rollout, this allows us a more fine grained control over the process.
+func conditionallyAddToGlobalConfigString(
+	globalConfigBytes *bytes.Buffer,
+	hcluster *hyperv1.HostedCluster,
+	releaseImage *releaseinfo.ReleaseImage,
+) error {
+	version, err := semver.Parse(releaseImage.Version())
+	if err != nil {
+		return fmt.Errorf("failed to parse release image version: %w", err)
+	}
+	version.Pre = nil
+
+	// Starting on v4.23.0 we support TLS Profile configuration.
+	// Only TLSSecurityProfile affects worker node configuration; other
+	// APIServer fields are control-plane-only and must not be included
+	// in the hash to avoid unnecessary NodePool rollouts.
+	if version.GTE(semver.MustParse("4.23.0")) {
+		var tlsProfile *configv1.TLSSecurityProfile
+		if hcluster.Spec.Configuration != nil && hcluster.Spec.Configuration.APIServer != nil {
+			tlsProfile = hcluster.Spec.Configuration.APIServer.TLSSecurityProfile
+		}
+		tlsBytes, err := json.Marshal(tlsProfile)
+		if err != nil {
+			return fmt.Errorf("failed to encode TLS security profile: %w", err)
+		}
+		globalConfigBytes.Write(tlsBytes)
+		globalConfigBytes.WriteByte('\n')
+	}
+
+	return nil
 }
 
 // GetCloudConfigHash returns a hash of the platform-specific cloud config ConfigMap content.

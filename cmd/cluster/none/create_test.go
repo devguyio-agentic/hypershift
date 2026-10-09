@@ -32,7 +32,7 @@ func TestCreateCluster(t *testing.T) {
 		args []string
 	}{
 		{
-			name: "minimal flags necessary to render",
+			name: "When minimal flags are provided, it should render successfully",
 			args: []string{
 				"--external-api-server-address=fakeAddress", // if we don't set it, the machine's IP is looked up, which isn't portable
 				"--render-sensitive",
@@ -56,7 +56,7 @@ func TestCreateCluster(t *testing.T) {
 			coreOpts.Render = true
 			coreOpts.RenderInto = manifestsFile
 
-			if err := core.CreateCluster(ctx, coreOpts, noneOpts); err != nil {
+			if err := core.CreateCluster(ctx, coreOpts, noneOpts, nil); err != nil {
 				t.Fatalf("failed to create cluster: %v", err)
 			}
 

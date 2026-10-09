@@ -8,6 +8,7 @@ import (
 	"time"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	"github.com/openshift/hypershift/support/imageregistry"
 	"github.com/openshift/hypershift/support/util"
 
 	"github.com/blang/semver"
@@ -53,7 +54,7 @@ func (c *imagesCache) setImages(images map[string]string, inputsHash string) {
 var catalogImagesCache = &imagesCache{}
 
 // GetCatalogImages uses a simple cache to prevent frequent registry lookups for catalog images
-func GetCatalogImages(ctx context.Context, hcp hyperv1.HostedControlPlane, pullSecret []byte, imageMetadataProvider util.ImageMetadataProvider, registryOverrides map[string][]string) (map[string]string, error) {
+func GetCatalogImages(ctx context.Context, hcp hyperv1.HostedControlPlane, pullSecret []byte, imageMetadataProvider imageregistry.ImageMetadataProvider, registryOverrides map[string][]string) (map[string]string, error) {
 	return getCatalogImagesWithCache(
 		imageLookupCacheKeyFn(&hcp, pullSecret, registryOverrides),
 		releaseVersionFn(ctx, &hcp, pullSecret, imageMetadataProvider),
@@ -89,7 +90,7 @@ func imageLookupCacheKeyFn(hcp *hyperv1.HostedControlPlane, pullSecret []byte, r
 	}
 }
 
-func releaseVersionFn(ctx context.Context, hcp *hyperv1.HostedControlPlane, pullSecret []byte, imageMetadataProvider util.ImageMetadataProvider) func() (*semver.Version, error) {
+func releaseVersionFn(ctx context.Context, hcp *hyperv1.HostedControlPlane, pullSecret []byte, imageMetadataProvider imageregistry.ImageMetadataProvider) func() (*semver.Version, error) {
 	return func() (*semver.Version, error) {
 		imageRef := hcp.Spec.ReleaseImage
 		imageConfig, _, _, err := imageMetadataProvider.GetMetadata(ctx, imageRef, pullSecret)
@@ -105,7 +106,7 @@ func releaseVersionFn(ctx context.Context, hcp *hyperv1.HostedControlPlane, pull
 	}
 }
 
-func imageExistsFn(ctx context.Context, hcp *hyperv1.HostedControlPlane, pullSecret []byte, imageMetadataProvider util.ImageMetadataProvider) func(image string) (bool, error) {
+func imageExistsFn(ctx context.Context, hcp *hyperv1.HostedControlPlane, pullSecret []byte, imageMetadataProvider imageregistry.ImageMetadataProvider) func(image string) (bool, error) {
 	return func(image string) (bool, error) {
 		if hcp.Spec.OLMCatalogPlacement == hyperv1.GuestOLMCatalogPlacement {
 			return true, nil
@@ -158,14 +159,12 @@ func computeCatalogImages(releaseVersion func() (*semver.Version, error), imageE
 	catalogImageNames := map[string]string{
 		"certified-operators": "certified-operator-index",
 		"community-operators": "community-operator-index",
-		"redhat-marketplace":  "redhat-marketplace-index",
 		"redhat-operators":    "redhat-operator-index",
 	}
 
 	catalogs := map[string]string{
 		"certified-operators": "",
 		"community-operators": "",
-		"redhat-marketplace":  "",
 		"redhat-operators":    "",
 	}
 

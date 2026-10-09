@@ -17,8 +17,8 @@ import (
 	"github.com/openshift/hypershift/support/globalconfig"
 	"github.com/openshift/hypershift/support/k8sutil"
 	karpenterutil "github.com/openshift/hypershift/support/karpenter"
+	"github.com/openshift/hypershift/support/reconcilerpolicy"
 	"github.com/openshift/hypershift/support/upsert"
-	supportutil "github.com/openshift/hypershift/support/util"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/arn"
@@ -331,7 +331,7 @@ func (r *AWSEndpointServiceReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("failed to get hosted cluster: %w", err)
 	}
 
-	if isPaused, duration := supportutil.IsReconciliationPaused(log, hc.Spec.PausedUntil); isPaused {
+	if isPaused, duration := reconcilerpolicy.IsReconciliationPaused(log, hc.Spec.PausedUntil); isPaused {
 		log.Info("Reconciliation paused", "pausedUntil", *hc.Spec.PausedUntil)
 		return ctrl.Result{RequeueAfter: duration}, nil
 	}
@@ -668,7 +668,7 @@ func (r *AWSEndpointServiceReconciler) reconcileAWSEndpointServiceStatus(ctx con
 	return nil
 }
 
-func apiTagToEC2Tag(in []hyperv1.AWSResourceTag) []ec2types.Tag {
+func apiTagToEC2Tag(in []hyperv1.AWSEndpointServiceResourceTag) []ec2types.Tag {
 	result := make([]ec2types.Tag, 0, len(in))
 	for _, val := range in {
 		result = append(result, ec2types.Tag{Key: aws.String(val.Key), Value: aws.String(val.Value)})

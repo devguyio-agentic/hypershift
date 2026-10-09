@@ -9,9 +9,9 @@ import (
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/common"
 	"github.com/openshift/hypershift/support/catalogs"
 	component "github.com/openshift/hypershift/support/controlplane-component"
+	"github.com/openshift/hypershift/support/imageregistry"
 	"github.com/openshift/hypershift/support/podspec"
 	"github.com/openshift/hypershift/support/thirdparty/library-go/pkg/image/reference"
-	"github.com/openshift/hypershift/support/util"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -59,7 +59,6 @@ func getCatalogImagesOverrides(cpContext component.WorkloadContext, capabilityIm
 	hcp := cpContext.HCP
 	catalogOverrides := map[string]string{
 		"redhat-operators":    hcp.Annotations[hyperv1.RedHatOperatorsCatalogImageAnnotation],
-		"redhat-marketplace":  hcp.Annotations[hyperv1.RedHatMarketplaceCatalogImageAnnotation],
 		"community-operators": hcp.Annotations[hyperv1.CommunityOperatorsCatalogImageAnnotation],
 		"certified-operators": hcp.Annotations[hyperv1.CertifiedOperatorsCatalogImageAnnotation],
 	}
@@ -107,7 +106,7 @@ func getCatalogImagesOverrides(cpContext component.WorkloadContext, capabilityIm
 }
 
 func getCatalogImages(cpContext component.WorkloadContext, pullSecret []byte) (map[string]string, error) {
-	registryOverrides := util.ConvertImageRegistryOverrideStringToMap(cpContext.HCP.Annotations[hyperv1.OLMCatalogsISRegistryOverridesAnnotation])
+	registryOverrides := imageregistry.ConvertImageRegistryOverrideStringToMap(cpContext.HCP.Annotations[hyperv1.OLMCatalogsISRegistryOverridesAnnotation])
 	return catalogs.GetCatalogImages(cpContext, *cpContext.HCP, pullSecret, cpContext.ImageMetadataProvider, registryOverrides)
 }
 
@@ -124,7 +123,7 @@ func checkCatalogImageOverides(images map[string]string) (bool, error) {
 	if override {
 		for _, image := range images {
 			if image == "" {
-				return false, errors.New("if OLM catalog images are overridden, all the values for the 4 default catalogs should be provided")
+				return false, errors.New("if OLM catalog images are overridden, all the values for the 3 default catalogs should be provided")
 			}
 		}
 	}

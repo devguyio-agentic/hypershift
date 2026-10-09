@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/openshift/hypershift/support/certs"
-	"github.com/openshift/hypershift/support/podspec"
+	"github.com/openshift/hypershift/support/config"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/clientcmd"
@@ -18,37 +18,37 @@ func TestAddBracketsIfIPv6(t *testing.T) {
 		want       string
 	}{
 		{
-			name:       "given ipv4, it should not have brackets",
+			name:       "When given an IPv4 address, it should not add brackets",
 			apiAddress: "192.168.1.1",
 			want:       "192.168.1.1",
 		},
 		{
-			name:       "given an URL, it should not have brackets",
+			name:       "When given a URL with port, it should not add brackets",
 			apiAddress: "https://test.tld:8451",
 			want:       "https://test.tld:8451",
 		},
 		{
-			name:       "given another URL sample, it should not have brackets",
+			name:       "When given a URL without port, it should not add brackets",
 			apiAddress: "https://test",
 			want:       "https://test",
 		},
 		{
-			name:       "given an URL, it should not have brackets",
+			name:       "When given a hostname with port, it should not add brackets",
 			apiAddress: "test.tld:8451",
 			want:       "test.tld:8451",
 		},
 		{
-			name:       "given simplified ipv6, it should return URL with brackets",
+			name:       "When given a simplified IPv6 address, it should return it with brackets",
 			apiAddress: "fd00::1",
 			want:       "[fd00::1]",
 		},
 		{
-			name:       "given an ipv6, it should return URL with brackets",
+			name:       "When given a full IPv6 address, it should return it with brackets",
 			apiAddress: "fd00:0000:0000:0000:0000:0000:1:99",
 			want:       "[fd00:0000:0000:0000:0000:0000:1:99]",
 		},
 		{
-			name:       "given wrong ipv6, it should return same URL without brackets",
+			name:       "When given an invalid IPv6 address, it should return it without brackets",
 			apiAddress: "fd00:0000:0000:0000:0000:0000:1:99000:00000000000",
 			want:       "fd00:0000:0000:0000:0000:0000:1:99000:00000000000",
 		},
@@ -103,9 +103,9 @@ func TestReconcileServiceAccountKubeconfigWithURL(t *testing.T) {
 				t.Fatalf("failed to reconcile kubeconfig: %v", err)
 			}
 
-			kubeconfigData, hasKubeconfig := secret.Data[podspec.KubeconfigKey]
+			kubeconfigData, hasKubeconfig := secret.Data[config.KubeconfigKey]
 			if !hasKubeconfig {
-				t.Fatalf("expected %q key to be present in secret data", podspec.KubeconfigKey)
+				t.Fatalf("expected %q key to be present in secret data", config.KubeconfigKey)
 			}
 
 			kubeconfig, err := clientcmd.Load(kubeconfigData)
