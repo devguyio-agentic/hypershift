@@ -1,0 +1,236 @@
+Bottom line: CPO is a hosted OpenShift control-plane lifecycle orchestrator. Manifest reconciliation is its foundation, but not its complete job: the surrounding operator system coordinates releases, distributed trust, encryption transitions, etcd maintenance, guest bootstrap, node upgrades, and cloud connectivity.
+The most important distinction is binary ≠ process ≠ controller ≠ managed component. Much of the apparent complexity becomes clearer once those boundaries are separated.
+I traced the source at openshift/hypershift commit 253c3f5c790d08668d4aa365688e88a0ab950af8 on main, dated October 15, 2026. This describes that revision—not necessarily an older deployed release. Below is the architectural analysis; the complete source audit is linked at the end.
+1. What exactly is CPO?
+Strictly: the process started by control-plane-operator run. Its root desired-state object is a HostedControlPlane (HCP). It runs against the management API, with a namespace-scoped cache and leader election, and reconciles the control-plane workloads and their supporting resources.
+More broadly: people use “CPO” to mean the control-plane distribution machinery delivered with its image. That includes sibling processes and helpers, but they are not all controllers inside the run process.
+The responsibility split is:
+text
+hypershift-operator
+  HostedCluster / NodePool lifecycle
+  management-side setup and CPO deployment
+          |
+          v
+CPO run: HostedControlPlane reconciliation
+  control-plane workloads and supporting resources
+  component dependencies, versions, health and infrastructure
+          |
+          +-- HCCO process: management <-> guest coordination
+          +-- PKI process: specialized admin trust lifecycle
+          +-- ignition process: worker bootstrap payloads
+          +-- etcd maintenance / bootstrap / proxy helpers
+          +-- independent operand operators: CVO, CNO, DNS, ...
+This is a responsibility diagram, not a claim that every child shares the same executable or owner reference.
+CPO is not:
+• The Kubernetes API server or controller-manager—it deploys those operands.
+• The fleet-level HyperShift operator.
+• A process containing all the internal reconcilers of CVO, CNO, storage, ingress, etc.
+• A replacement for Kubernetes’ Deployment/StatefulSet controllers.
+Same-binary scope
+The actual command dispatch contains these groups:
+• Operator-like processes: run, hosted-cluster-config-operator, ignition-server, etcd-defrag-controller.
+• Connectivity/serving: konnectivity-socks5-proxy, konnectivity-https-proxy, kubernetes-default-proxy, endpoint-resolver, metrics-proxy.
+• Bootstrap/configuration: kas-bootstrap, sync-fg-configmap, sync-global-pullsecret, resolve-dns.
+• Credentials/availability/backup helpers: token-minter, availability-prober, etcd-backup, fetch-etcd-certs, etcd-upload.
+Some also support dispatch by executable basename. Sharing an executable does not imply sharing a manager, cache, leader election, or reconciliation queue.
+Two consequential boundary corrections:
+• HCCO is the same binary, invoked with a different subcommand, in a separate process/Deployment.
+• PKI is a separate binary in the same image: control-plane-pki-operator operator. It is relevant architecturally, but is not a CPO subcommand. See the image build.
+Likewise, machine-config tools used by ignition are extracted from the selected MCO image; MCD upgrade Pods use the MCO image. Those tools are not hidden CPO subcommands.
+2. What operations is it trying to achieve?
+02:11
+I would divide its operation into six layers.
+A. Materialize an OpenShift control plane
+Turn HCP topology, platform, publishing strategies, release images, capabilities, security settings, and cluster configuration into Deployments, StatefulSets, Jobs, Services, Routes, RBAC, configuration, credentials, monitoring resources, and storage specifications.
+The actual component registration covers:
+• Core control plane: etcd and configured shards, kube-apiserver, kube-controller-manager, kube-scheduler.
+• OpenShift APIs/controllers: OpenShift API server, OAuth API/server, OpenShift controller-manager, route controller-manager, cluster-policy-controller.
+• Lifecycle/security: HCCO, PKI operator, CVO, feature-gate generation, storage-version migrator.
+• Platform and workers: platform CCMs, cloud-credential operator, autoscaler, machine approver, AWS termination handler.
+• Cluster services: network, DNS, storage, CSI snapshot, KubeVirt CSI, node tuning, ingress, registry operators.
+• Hosted infrastructure: ignition and its proxy, Konnectivity agent, HCP router, endpoint resolver, metrics proxy.
+• OLM: catalog operator, OLM operator, packageserver, profile collection, and default catalog workloads.
+These are component constructions, not individual registered CPO controllers. Platform/capability predicates determine which apply.
+B. Coordinate bootstrap and dependencies
+The HCP loop does not simply apply everything and declare success. It first reconciles publishing infrastructure and waits for readiness. It prepares shared configuration, PKI, credentials, and other prerequisites, then invokes component adapters.
+The v2 component framework checks a prerequisite’s availability, rollout completion, and desired release version before updating a dependent component. For example, KAS depends on etcd and feature-gate generation; most later components depend on KAS. The component framework is a dependency-aware lifecycle layer, not another controller manager.
+Sources: infrastructure-first update, component invocation, dependency gates.
+C. Coordinate release transitions
+CPO resolves release metadata/images, guards against an old CPO reconciling a different desired release, rolls components through dependencies, and aggregates component rollout into HCP ControlPlaneVersion status/history.
+There are distinct control-plane and user-release providers. That does not establish support for arbitrary version combinations. Also keep these separate:
+• HCP ControlPlaneVersion: control-plane component progression.
+• Guest ClusterVersion: CVO’s release progression.
+• Individual Deployment/StatefulSet readiness: workload progression.
+This is not an atomic transaction or automatic rollback guarantee. See version aggregation.
+D. Bridge management and guest state
+02:11
+HCCO is the main cross-API coordinator. It manages guest configuration/bootstrap objects, credentials and trust synchronization, observes guest version/authentication status, and performs worker operations. Its manager targets the guest API, while a second cluster client/cache accesses the management-side namespace. Leader election uses the management cluster.
+E. Execute operational protocols
+This includes encryption migration, certificate trust transitions, node drain/upgrades, etcd defrag, token renewal, and private endpoint/DNS operations—expanded in question 5.
+F. Observe, report, and tear down
+CPO validates configuration, observes infrastructure and operand conditions, probes API health, reports availability/degradation, and performs finalizer/cleanup work. Observation/status work occurs before the pause check, so “paused” does not mean the process stops all activity.
+Deletion includes asynchronous and guarded cloud cleanup; removing the HCP is not proof that every external resource was successfully deleted. See status, pause, and validity ordering.
+3. What problem categories is it solving?
+Architecturally, I see seven interlocking problems—not one oversized templating problem:
+• Hosted topology: make control-plane processes work as management-cluster workloads while serving a different cluster’s API and workers. Publishing, tunnels, proxies, routing, DNS, and bootstrap all participate.
+• Distribution assembly: assemble the Kubernetes core plus OpenShift APIs and operators from release-selected artifacts, while dividing ownership between CPO, HCCO, CVO, and specialized operand operators.
+• Safe transitions: the final configuration alone is insufficient. Intermediate states matter: introduce a new encryption key before writing with it; propagate new trust before removing old trust; wait for prerequisites before rolling dependents.
+• State preservation and availability: etcd maintenance/replacement/restore and worker upgrade disruption require domain-specific rules beyond “make replicas equal N.” Responsibility is split across CPO, helpers, HO, MCD, and underlying Kubernetes controllers.
+• Cross-cluster authority and synchronization: desired configuration and credentials travel toward the guest; observed CA/configuration/version information travels back. HCCO centralizes these bridge operations in a management-resident process.
+• External resource lifecycle: cloud endpoint and DNS operations have their own readiness, asynchronous completion, identity, and deletion semantics.
+• Truthful lifecycle reporting: distinguish a manifest existing, a workload becoming available, a release finishing rollout, an encryption migration completing, and an old certificate actually ceasing to authenticate.
+My architectural characterization: CPO is both an operator of components/operators and a coordinator of domain-specific lifecycle protocols. The first describes its composition; the second explains why a pure manifest renderer would not capture its behavior.
+4. Which controllers does it contain?
+4a. The actual CPO run process
+Always registered:
+• HostedControlPlaneReconciler: the primary lifecycle controller that invokes the component framework.
+• HealthCheckUpdater: a periodic runnable for platform-identity health/status, not an object-watch controller.
+Conditional private-connectivity registrations:
+• AWS: PrivateKubeAPIServerServiceObserver, PrivateIngressServiceObserver, AWSEndpointServiceReconciler.
+• GCP: GCPPrivateServiceObserver, GCPPrivateServiceConnectReconciler.
+• Azure: AzurePrivateLinkServiceObserver, optionally AzurePrivateLinkServiceOAuthObserver, and AzurePrivateLinkServiceReconciler.
+02:11
+The startup path requires a private HCP and management Route capability for these cloud registrations. Azure additionally requires the applicable private configuration, excludes ARO, and adds the OAuth observer only for LoadBalancer OAuth publishing. They are not all started on every cluster.
+The HCP reconciler watches HCP plus supporting configuration/workload/service/RBAC/monitoring resources; Routes are capability-conditional. Its setup does not register a Pod or ControlPlaneComponent watch, so periodic observation also matters.
+Sources: base startup, cloud startup, secondary watches.
+4b. HCCO: same binary, separate process
+The selectable setup inventory is:
+• controller-manager-ca → ca-configmap-observer: observe selected guest CA ConfigMaps and copy bundles to management.
+• resources: reconcile guest bootstrap/configuration, operator configuration, credentials, services, RBAC, and related resources.
+• inplaceupgrader: coordinate MachineSet/node configuration transitions and per-node MCD upgrade Pods.
+• node: map Machine/NodePool ownership and managed labels onto guest Nodes.
+• nodecount: project node count to HCP status; default inclusion is controlled by ENABLE_SIZE_TAGGING.
+• machine: KubeVirt-specific Service/EndpointSlice passthrough and orphan cleanup; setup is a no-op on other platforms.
+• drainer: annotation-driven cordon/drain/uncordon with completion acknowledgment.
+• hcpstatus: project guest ClusterVersion/Authentication observations into HCP status.
+• spot-remediation: AWS-only termination-taint handling that deletes the corresponding interruptible CAPI Machine.
+• reencryption: coordinate encryption key transitions, KAS convergence, and storage migration.
+• user-ca-bundle: synchronize user trust material.
+• webhook-validation: remove guest webhook configurations targeting disallowed control-plane Service URLs.
+Separately added: globalps on AWS/Azure, outside the selectable controller map. It manages global/original pull-secret merging/distribution and node synchronization workload.
+Thus “HCCO has twelve controllers” is an incomplete runtime description: selection, default flags, platform guards, and the extra globalps setup matter.
+Sources: setup map, selection and platform addition.
+4c. Other same-binary operator-like processes
+• Ignition: one TokenSecretReconciler, watching annotated Secrets, plus HTTPS serving and a payload cache.
+• Etcd defrag: a leader-elected manager with a periodic defragTicker runnable—not an object-watch reconciliation queue.
+• Endpoint resolver: a Pod informer/lister and HTTP handlers—not a reconcile controller.
+• Token renewal, pull-secret file synchronization, probes, proxies, and finite bootstrap/backup commands should not be counted as additional CPO manager controllers.
+Sources: ignition registration, defrag startup.
+4d. PKI: separate binary, relevant sibling
+Its actual reconciliation controllers comprise:
+02:11
+• One TargetConfigController for aggregated KAS client trust/status.
+• Two cert-rotation controllers: customer-admin and SRE-admin signer/bundle/client credentials.
+• Two CSR approval controllers, one per signer domain.
+• Two CA-loading controllers, one per signer domain.
+• Two certificate-signing controllers, one per signer domain.
+• One CertificateRevocationController.
+These are ten controllers, although the startup has nine top-level runnable objects because the cert-rotation supervisor starts two controllers. They serve HCP-specific admin/break-glass trust—not generic unconditional guest kubelet CSR approval.
+Source: PKI construction/startup.
+Key architectural point: the component list in question 2 is not this controller inventory. One HCP reconcile invokes many component adapters; those adapters deploy processes that may themselves contain many controllers.
+5. Which operands receive management beyond manifest shape?
+This is the most revealing question. I would distinguish:
+• Direct operations: RPCs, authentication checks, cloud calls, local crypto, subprocesses.
+• Semantic orchestration: a state machine using Kubernetes objects/status to coordinate other actors.
+• Ordinary reconciliation: render/apply desired resources.
+A protocol can be implemented entirely through API writes and still be much more than manifest rendering.
+A. Etcd: maintenance, replacement, restore, backup
+• Baseline: CPO builds the StatefulSet, peer configuration, TLS, storage templates, and related resources. Kubernetes handles Pod lifecycle; etcd handles Raft.
+• Replacement member: the StatefulSet’s reset-member init script detects an empty local database, examines membership, and removes/re-adds a matching old member. This is an operand-container membership operation, not an RPC performed by CPO’s HCP loop. It needs a functioning cluster; it is not arbitrary quorum-loss recovery.
+• Defrag: the same-binary maintenance process lists members, checks health and fragmentation, excludes learners, processes the leader last, calls Defragment, and checks health between members. This is an actual database-maintenance algorithm.
+• Restore: CPO arranges an init container for a configured snapshot restore. The script downloads/restores the snapshot, sets member/peer identity, bumps revision and marks compacted, then installs restored data. Existing nonempty data skips restoration; this is not “unhealthy etcd automatically restores itself.”
+• Backup: helper commands save/upload snapshots or upload an existing snapshot. Their existence does not imply a recurring backup controller is registered in CPO.
+Important ownership correction: automated single-member recovery is owned by hypershift-operator and its recover-etcd helper, not CPO. That helper has explicit healthy-member guards and can remove broken Pod/PVC state. It is not a same-binary CPO command.
+Sources: member reset, defrag algorithm, restore script, HO recovery orchestration.
+B. KAS authentication and PKI: trust transitions, not just Secret generation
+02:11
+CPO’s legacy PKI path generates/reconciles CA, signing, serving and client material, and kubeconfigs. Leaf-certificate reconciliation considers certificate/configuration validity and can regenerate crypto material.
+The dedicated PKI operator adds a stronger distributed protocol for customer/SRE admin trust:
+1. Establish replacement signer/trust material.
+2. Wait for new trust to propagate.
+3. Issue appropriate credentials.
+4. Prune old signer trust.
+5. Verify new credentials work and revoked credentials no longer work.
+Crucially, it connects to each eligible KAS Pod and submits SelfSubjectReview using the relevant certificates. Completion depends on observed authentication behavior—not merely on a new Secret existing.
+This is signer/trust replacement for the implemented admin domains, not arbitrary per-certificate CRL/OCSP handling.
+Negative findings matter: the legacy self-signed CA helper is not a general periodic CA-rotation implementation. Likewise, service-account signing-key reconciliation generates missing material but does not implement periodic key rotation or a multi-key transition protocol.
+Sources: revocation stages, per-KAS verification, SA signing keys.
+C. KAS/etcd encrypted data: cooperative encryption migration
+CPO and HCCO implement a staged transition:
+1. HCCO tracks active/target key identity and rotation history.
+2. CPO renders KAS encryption configuration that initially introduces the target as a reader while retaining the old writer.
+3. After observed KAS convergence, promote the new writer while retaining old-key readability.
+4. HCCO advances through ReadOnlyDeploy, WritePromote, and Migrating, using actual configuration/hash and rollout observations.
+5. HCCO requests/polls StorageVersionMigration work and records completion.
+HCCO does not directly rewrite etcd records. A separate storage-migration controller executes the migration. CPO also validates configured cloud KMS access; KAS/provider operands perform ongoing encryption/decryption.
+This is a particularly strong example of semantic orchestration beyond manifests: safety depends on the transition order and observed convergence, not just the desired final encryption configuration.
+Sources: CPO encryption configuration, HCCO transition logic.
+D. Control-plane operands collectively: coordinated release rollout
+CPO manages a dependency-aware transition across operands, using actual availability, desired versions, rollout completion, and optional operand-specific rollout checks. It then aggregates completion/history. This is more than selecting new image tags, even though Deployments/StatefulSets execute the Pod replacement.
+The generic component framework does not make every component a stateful domain operator: many components remain predominantly desired-resource adapters. The specialized cases above and below are where the richer semantics live.
+5, continued: worker, cloud, credential, and bootstrap operations
+E. Worker Nodes and MachineSets: in-place upgrades and drain
+HCCO’s inplaceupgrader:
+02:11
+• Compares current/target MachineSet configuration and guest-node state.
+• Calculates upgrade capacity from maximum unavailable and nodes already unavailable.
+• Prepares config payloads, selects nodes, and creates per-node privileged MCD Pods.
+• Waits for node config completion, updates MachineSet bookkeeping, and removes upgrade artifacts.
+MCD performs the actual host/OS configuration work. HCCO orchestrates that work rather than implementing the host updater itself.
+The drainer controller does directly perform cordon, drain, and uncordon through the drain library and acknowledges completion. On AWS, spot-remediation deletes the matching interruptible CAPI Machine after observing termination-handler taints; CAPI/infrastructure controllers own the subsequent replacement—not a direct EC2 termination call here.
+Sources: upgrade scheduling, drain operations, spot remediation.
+F. Cloud endpoints and DNS: external-system operators
+The private-connectivity controllers are not limited to emitting Kubernetes Service manifests:
+• AWS: VPC endpoint creation/modification/deletion, endpoint security groups, Route53 records.
+• Azure: private endpoints, private DNS zones, VNet links and A records, including asynchronous cloud operation handling.
+• GCP: PSC address/forwarding-rule operations and direct Cloud DNS zone/record calls. There is also DNSEndpoint publication for delegation; direct DNS operations and external-DNS publication are distinct paths.
+Service observers convert observed load-balancer information into the intermediate CR contracts; endpoint reconcilers perform the external lifecycle work. Provider-side service attachment/endpoint-service provisioning must not be conflated with the customer-side endpoint these controllers consume/manage.
+Sources: AWS endpoint operations, Azure DNS lifecycle, GCP DNS operations.
+G. Credentials: active token minting/renewal
+token-minter calls the target API’s ServiceAccount TokenRequest API and writes the result to a file. Long-running mode renews based on remaining lifetime and retries failures. This is active credential lifecycle, not static Secret generation—and the target API server signs the token, not the helper itself.
+HCCO also distributes operand credentials and global pull-secret material; a separate same-binary utility synchronizes node-local pull-secret files. Those paths do not establish that CPO creates or rotates every customer cloud IAM principal.
+Source: token minting and renewal.
+H. Ignition: compilation and subprocess orchestration
+02:11
+The ignition Secret controller maintains token-to-payload state and cache, responds to deletion/expiry, resolves release artifacts, and drives local payload generation. The provider extracts the selected machine-config executables, runs their bootstrap stages, starts a bootstrap machine-config server long enough to obtain rendered ignition, then stops it.
+That is a generated-artifact/build-and-serve pipeline—not merely reconciliation of a server Deployment. It does not mean a normal continuously running MCO manager is embedded inside CPO.
+Source: machine-config bootstrap pipeline.
+I. Guest trust/configuration and isolation enforcement
+HCCO synchronizes selected trust data in both directions, applies guest bootstrap/operator configuration, and projects guest status. Its webhook-validation controller can delete observed guest webhook configurations targeting disallowed control-plane Service URLs. That is an enforcement/repair action, not just creation of desired bootstrap objects.
+Source: webhook isolation enforcement.
+Where the boundary stops
+CPO deploys operators such as network, DNS, ingress, storage, registry, and CVO, but their downstream domain algorithms remain their responsibility. Likewise, observing an unhealthy component does not imply CPO has an automatic repair protocol for every possible failure. Its richer operations are specific, implemented protocols—not a universal autonomous cluster-repair engine.
+6. Are there similar operators, or a category?
+Yes. The most useful category is “hosted Kubernetes/OpenShift control-plane lifecycle operator.” For the broader CPO/HCCO/PKI/helper system, I would add multi-controller, cross-cluster lifecycle orchestration with delegated operators. That is an architectural description, not a formal Kubernetes API category.
+Closest system-level analogue: Gardener
+Gardener hosts Shoot API servers, controller-managers, schedulers, and etcd in Seed clusters, with declarative Shoot reconciliation driving provisioning and upgrades. It is a strong analogue for the overall hosting topology and split control/data-plane lifecycle.
+It is not a one-to-one mapping of Gardener’s Garden/Seed/Shoot concepts to HyperShift’s APIs, nor proof of identical controller boundaries.
+Gardener architecture
+Closest focused hosted-control-plane operator analogue: Kamaji
+Kamaji reconciles a namespaced TenantControlPlane, runs control-plane components in Pods, and manages certificates/add-ons with an explicit Datastore abstraction.
+It is a useful comparison for CPO’s Pod-hosted Kubernetes control-plane lifecycle, but its datastore abstraction and scope differ from HyperShift’s managed/unmanaged etcd plus OpenShift-wide operator distribution.
+Kamaji architecture
+Closest lifecycle-protocol contrast: Cluster API KubeadmControlPlane
+KCP reconciles control-plane Machines, kubeconfig, health, scaling/upgrading, and etcd membership consistency. It makes a useful comparison for critical stateful control-plane orchestration.
+The key distinction: KCP’s kubeadm control planes are machine-hosted; CPO’s control plane is workload-hosted in a management cluster. Also, KCP’s direct etcd-member reconciliation should not be attributed to CPO’s HCP loop just because both manage control planes.
+02:11
+KCP reconciliation, etcd-member reconciliation
+Closest OpenShift operational analogue: kube-apiserver/static-Pod operators
+The standalone OpenShift KAS operator combines operator logic, config observation, bootstrap rendering, and static-Pod installation. It is a useful analogy for critical-component configuration and rollout management. CPO instead manages hosted Deployments and coordinates the broader hosted distribution and sibling processes.
+OpenShift KAS operator
+Conceptually related, but not an equivalent: Crossplane
+Crossplane is a framework for building declarative control planes over applications/infrastructure. That helps describe composition and external-resource orchestration. CPO, however, is a concrete, domain-specific hosted-control-plane lifecycle implementation—not merely a generic composition definition.
+Crossplane scope
+Final architectural take
+I would model the system as:
+• CPO: control-plane assembly, dependency/rollout orchestration, management-side infrastructure and status.
+• HCCO: cross-cluster configuration and guest operational protocols.
+• PKI: specialized distributed admin-trust lifecycle.
+• Ignition: worker bootstrap artifact generation/serving.
+• Maintenance/helpers: narrowly scoped operational actions.
+• Operand operators: delegated domain control loops.
+Calling it “a large manifest reconciler” misses the safety protocols. Calling it “one giant controller-manager” misses the process and ownership boundaries. A distributed control-plane lifecycle system, packaged partly as a shared executable, is the more accurate mental model.
+Limitations: this was a read-only source investigation, not live-cluster validation. Platform/capability gates apply; comparison sources establish architectural similarity, not feature parity.
+Full source audit
+The complete report includes the component inventory, per-process controller/watch tables, platform gates, detailed semantic-operation traces, and immutable source references:
+Comprehensive read-only HyperShift CPO/HCCO/PKI architecture investigation at 253c3f5c790d08668d4aa365688e88a0ab950af8: six questions, complete process/controller inventory, 188 source citation instances, semantic operand operations and five authoritative comparisons. (May contain AI-generated content. Review for accuracy.)

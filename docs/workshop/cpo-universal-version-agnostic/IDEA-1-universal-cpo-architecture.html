@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Universal CPO — Version-Agnostic Hosting Substrate</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#020617; --panel:#0b1220; --grid:#1e293b;
+    --fe:#22d3ee; --be:#34d399; --db:#a78bfa; --cloud:#fbbf24;
+    --sec:#fb7185; --bus:#fb923c; --ext:#94a3b8; --text:#e2e8f0; --dim:#64748b;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:'JetBrains Mono',monospace;padding:28px;}
+  .header{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--be);box-shadow:0 0 0 0 rgba(52,211,153,.6);animation:pulse 2s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.5)}70%{box-shadow:0 0 0 10px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+  h1{font-size:18px;font-weight:700;letter-spacing:.5px}
+  .sub{color:var(--dim);font-size:11px;margin:2px 0 18px 22px}
+  .card-wrap{border:1px solid #1e293b;border-radius:12px;background:var(--panel);padding:10px;overflow-x:auto}
+  svg{display:block;margin:0 auto}
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:18px}
+  .card{background:var(--panel);border:1px solid #1e293b;border-radius:10px;padding:14px 16px}
+  .ch{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+  .cd{width:8px;height:8px;border-radius:50%}
+  .card h3{font-size:12px;font-weight:700}
+  .card li{list-style:none;font-size:10.5px;color:#cbd5e1;line-height:1.7}
+  .card .k{color:var(--dim)}
+  footer{color:var(--dim);font-size:9.5px;margin-top:16px;text-align:center}
+  .cyan{background:var(--fe)} .em{background:var(--be)} .vi{background:var(--db)}
+  .am{background:var(--cloud)} .ro{background:var(--sec)} .or{background:var(--bus)} .sl{background:var(--ext)}
+</style>
+</head>
+<body>
+  <div class="header"><span class="dot"></span><h1>Universal CPO — Version-Agnostic Hosting Substrate</h1></div>
+  <div class="sub">Idea 1 · Two tiers split by a versioned Environment Contract · three self-adapting outbound ports across the version boundary</div>
+
+  <div class="card-wrap">
+  <svg width="1260" height="880" viewBox="0 0 1260 880" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+        <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+      </pattern>
+      <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L7,3 L0,6 z" fill="#64748b"/>
+      </marker>
+      <marker id="arrEm" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L7,3 L0,6 z" fill="#34d399"/>
+      </marker>
+      <marker id="arrRo" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L7,3 L0,6 z" fill="#fb7185"/>
+      </marker>
+      <marker id="arrAm" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L7,3 L0,6 z" fill="#fbbf24"/>
+      </marker>
+    </defs>
+    <rect width="1260" height="880" fill="url(#grid)"/>
+
+    <!-- =============== TITLES =============== -->
+    <text x="300" y="30" fill="#e2e8f0" font-size="13" font-weight="700" text-anchor="middle" letter-spacing="1">MANAGEMENT CLUSTER  ·  ships with HyperShift</text>
+    <text x="1070" y="30" fill="#e2e8f0" font-size="13" font-weight="700" text-anchor="middle" letter-spacing="1">VERSION-SKEWED TARGETS</text>
+    <text x="1070" y="46" fill="#64748b" font-size="9" text-anchor="middle">from the OCP release payload (any version N)</text>
+
+    <!-- =============== CONTROL CHANNEL (HCP API, same-version) — drawn early, behind =============== -->
+    <!-- =============== TIER 1 : UNIVERSAL SUBSTRATE =============== -->
+    <rect x="40" y="70" width="520" height="470" rx="12" fill="rgba(6,78,59,0.14)" stroke="#34d399" stroke-width="1.5" stroke-dasharray="8,4"/>
+    <text x="60" y="96" fill="#34d399" font-size="13" font-weight="700">TIER 1 — UNIVERSAL SUBSTRATE</text>
+    <text x="60" y="112" fill="#64748b" font-size="9">version-agnostic hosting runtime · "the kubelet/CRI of control planes"</text>
+    <text x="60" y="126" fill="#34d399" font-size="8.5" opacity="0.8">carries NO target-version knowledge → already agnostic (live run: 35/36)</text>
+
+    <!-- substrate capability boxes -->
+    <!-- row 1 -->
+    <g>
+      <rect x="62" y="142" width="150" height="58" rx="6" fill="#0f172a"/>
+      <rect x="62" y="142" width="150" height="58" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="137" y="167" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">Placement</text>
+      <text x="137" y="183" fill="#94a3b8" font-size="8" text-anchor="middle">topology · priority · PDBs</text>
+    </g>
+    <g>
+      <rect x="222" y="142" width="150" height="58" rx="6" fill="#0f172a"/>
+      <rect x="222" y="142" width="150" height="58" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+      <text x="297" y="167" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">Identity / PKI</text>
+      <text x="297" y="183" fill="#94a3b8" font-size="8" text-anchor="middle">CAs · certs · kubeconfigs</text>
+    </g>
+    <g>
+      <rect x="382" y="142" width="156" height="58" rx="6" fill="#0f172a"/>
+      <rect x="382" y="142" width="156" height="58" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+      <text x="460" y="167" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">Datastore</text>
+      <text x="460" y="183" fill="#94a3b8" font-size="8" text-anchor="middle">etcd endpoint + creds</text>
+    </g>
+    <!-- row 2 -->
+    <g>
+      <rect x="62" y="212" width="150" height="58" rx="6" fill="#0f172a"/>
+      <rect x="62" y="212" width="150" height="58" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+      <text x="137" y="237" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">Connectivity</text>
+      <text x="137" y="253" fill="#94a3b8" font-size="8" text-anchor="middle">konnectivity · dialer</text>
+    </g>
+    <g>
+      <rect x="222" y="212" width="150" height="58" rx="6" fill="#0f172a"/>
+      <rect x="222" y="212" width="150" height="58" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+      <text x="297" y="237" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">Cloud Infra</text>
+      <text x="297" y="253" fill="#94a3b8" font-size="8" text-anchor="middle">SG · LB · PrivateLink · KMS</text>
+    </g>
+    <g>
+      <rect x="382" y="212" width="156" height="58" rx="6" fill="#0f172a"/>
+      <rect x="382" y="212" width="156" height="58" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="460" y="237" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">Orchestration</text>
+      <text x="460" y="253" fill="#94a3b8" font-size="8" text-anchor="middle">deps · rollout · status</text>
+    </g>
+    <!-- row 3 : the bridge spanning -->
+    <g>
+      <rect x="62" y="282" width="476" height="52" rx="6" fill="#0f172a"/>
+      <rect x="62" y="282" width="476" height="52" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+      <text x="300" y="304" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">Cross-Cluster Bridge (plumbing, not payloads)</text>
+      <text x="300" y="320" fill="#94a3b8" font-size="8" text-anchor="middle">mgmt ↔ guest state sync transport</text>
+    </g>
+
+    <!-- control channel: HCP API status -->
+    <g>
+      <rect x="62" y="352" width="476" height="56" rx="6" fill="#0f172a"/>
+      <rect x="62" y="352" width="476" height="56" rx="6" fill="rgba(30,41,59,0.6)" stroke="#94a3b8" stroke-width="1.5"/>
+      <text x="300" y="374" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">HCP API — the one SAME-VERSION surface (control channel)</text>
+      <text x="300" y="390" fill="#94a3b8" font-size="8" text-anchor="middle">records: resolved guest version · negotiated contract version · capability set</text>
+    </g>
+
+    <!-- enforcement band -->
+    <g>
+      <rect x="62" y="424" width="476" height="96" rx="6" fill="#0f172a"/>
+      <rect x="62" y="424" width="476" height="96" rx="6" fill="rgba(136,19,55,0.28)" stroke="#fb7185" stroke-width="1.5"/>
+      <text x="300" y="446" fill="#fb7185" font-size="11" font-weight="700" text-anchor="middle">STRUCTURAL ENFORCEMENT  (omission must not compile)</text>
+      <text x="300" y="465" fill="#e2e8f0" font-size="8.5" text-anchor="middle">every outbound emission MUST declare a version window — required arg, not optional builder</text>
+      <text x="300" y="480" fill="#e2e8f0" font-size="8.5" text-anchor="middle">gates read live operand version → self-tracking, correct at any distance</text>
+      <text x="300" y="502" fill="#fbbf24" font-size="8.5" font-weight="700" text-anchor="middle">CONFORMANCE MATRIX = tested definition of "universal"  ·  window [min,max] or refuse loudly</text>
+    </g>
+
+    <!-- =============== THE FIREWALL (Environment Contract) =============== -->
+    <rect x="590" y="70" width="150" height="640" rx="10" fill="rgba(251,146,60,0.14)" stroke="#fb923c" stroke-width="2"/>
+    <text x="665" y="96" fill="#fb923c" font-size="12" font-weight="700" text-anchor="middle">ENVIRONMENT</text>
+    <text x="665" y="112" fill="#fb923c" font-size="12" font-weight="700" text-anchor="middle">CONTRACT</text>
+    <text x="665" y="132" fill="#94a3b8" font-size="8" text-anchor="middle">the version firewall</text>
+    <line x1="606" y1="146" x2="724" y2="146" stroke="#fb923c" stroke-width="0.8" stroke-dasharray="3,3"/>
+    <text x="665" y="168" fill="#e2e8f0" font-size="8.5" text-anchor="middle">carries PRIMITIVES,</text>
+    <text x="665" y="181" fill="#e2e8f0" font-size="8.5" text-anchor="middle">not flags</text>
+    <text x="665" y="206" fill="#cbd5e1" font-size="8" text-anchor="middle">· etcd endpoint</text>
+    <text x="665" y="222" fill="#cbd5e1" font-size="8" text-anchor="middle">· serving certs</text>
+    <text x="665" y="238" fill="#cbd5e1" font-size="8" text-anchor="middle">· guest kubeconfig</text>
+    <text x="665" y="254" fill="#cbd5e1" font-size="8" text-anchor="middle">· konnectivity</text>
+    <text x="665" y="270" fill="#cbd5e1" font-size="8" text-anchor="middle">· config inputs</text>
+    <text x="665" y="286" fill="#cbd5e1" font-size="8" text-anchor="middle">· health sink</text>
+    <line x1="606" y1="306" x2="724" y2="306" stroke="#fb923c" stroke-width="0.8" stroke-dasharray="3,3"/>
+    <text x="665" y="330" fill="#fbbf24" font-size="8" font-weight="700" text-anchor="middle">add-only ·</text>
+    <text x="665" y="343" fill="#fbbf24" font-size="8" font-weight="700" text-anchor="middle">negotiated</text>
+    <text x="665" y="362" fill="#94a3b8" font-size="7.5" text-anchor="middle">versioned by</text>
+    <text x="665" y="374" fill="#94a3b8" font-size="7.5" text-anchor="middle">CONTRACT ver,</text>
+    <text x="665" y="386" fill="#94a3b8" font-size="7.5" text-anchor="middle">not OCP ver</text>
+    <text x="665" y="404" fill="#34d399" font-size="7.5" font-weight="700" text-anchor="middle">→ churns slowly</text>
+
+    <!-- =============== TIER 2 : AUTHORSHIP =============== -->
+    <rect x="780" y="70" width="140" height="300" rx="12" fill="rgba(120,53,15,0.16)" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="8,4"/>
+    <text x="850" y="96" fill="#fbbf24" font-size="11.5" font-weight="700" text-anchor="middle">TIER 2</text>
+    <text x="850" y="112" fill="#fbbf24" font-size="10" font-weight="700" text-anchor="middle">AUTHORSHIP</text>
+    <text x="850" y="128" fill="#64748b" font-size="7.5" text-anchor="middle">version-MATCHED</text>
+    <text x="850" y="139" fill="#64748b" font-size="7.5" text-anchor="middle">by construction</text>
+    <g>
+      <rect x="796" y="150" width="108" height="46" rx="6" fill="#0f172a"/>
+      <rect x="796" y="150" width="108" height="46" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+      <text x="850" y="170" fill="#e2e8f0" font-size="9" font-weight="700" text-anchor="middle">operand owns</text>
+      <text x="850" y="183" fill="#94a3b8" font-size="7.5" text-anchor="middle">its own config</text>
+    </g>
+    <g>
+      <rect x="796" y="206" width="108" height="46" rx="6" fill="#0f172a"/>
+      <rect x="796" y="206" width="108" height="46" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+      <text x="850" y="226" fill="#e2e8f0" font-size="9" font-weight="700" text-anchor="middle">OR: version-</text>
+      <text x="850" y="239" fill="#94a3b8" font-size="7.5" text-anchor="middle">indexed bundles</text>
+    </g>
+    <text x="850" y="278" fill="#cbd5e1" font-size="7.5" text-anchor="middle">"what flags does</text>
+    <text x="850" y="289" fill="#cbd5e1" font-size="7.5" text-anchor="middle">5.1's KAS take"</text>
+    <text x="850" y="305" fill="#64748b" font-size="7.5" text-anchor="middle">lives where it is</text>
+    <text x="850" y="316" fill="#64748b" font-size="7.5" text-anchor="middle">always matched</text>
+    <text x="850" y="340" fill="#fbbf24" font-size="7.5" text-anchor="middle">ships with /</text>
+    <text x="850" y="351" fill="#fbbf24" font-size="7.5" text-anchor="middle">rides the payload</text>
+
+    <!-- =============== THE THREE PORTS =============== -->
+    <text x="850" y="398" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle" letter-spacing="0.5">THE 3 OUTBOUND PORTS</text>
+    <text x="850" y="412" fill="#64748b" font-size="8" text-anchor="middle">each self-adapting across version skew</text>
+
+    <!-- port 1 : operand-config -->
+    <g>
+      <rect x="760" y="426" width="180" height="76" rx="6" fill="#0f172a"/>
+      <rect x="760" y="426" width="180" height="76" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="850" y="446" fill="#34d399" font-size="10" font-weight="700" text-anchor="middle">① operand-config port</text>
+      <text x="850" y="462" fill="#e2e8f0" font-size="8" text-anchor="middle">MANDATORY version-gating</text>
+      <text x="850" y="476" fill="#94a3b8" font-size="7.5" text-anchor="middle">self-tracks live operand ver</text>
+      <text x="850" y="492" fill="#64748b" font-size="7" text-anchor="middle">kills: --tls-curve-preferences</text>
+    </g>
+    <!-- port 2 : guest-API -->
+    <g>
+      <rect x="760" y="514" width="180" height="76" rx="6" fill="#0f172a"/>
+      <rect x="760" y="514" width="180" height="76" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+      <text x="850" y="534" fill="#22d3ee" font-size="10" font-weight="700" text-anchor="middle">② guest-API port</text>
+      <text x="850" y="550" fill="#e2e8f0" font-size="8" text-anchor="middle">DISCOVERY-gated writes</text>
+      <text x="850" y="564" fill="#94a3b8" font-size="7.5" text-anchor="middle">OpenAPI v3 + server-side apply</text>
+      <text x="850" y="580" fill="#64748b" font-size="7" text-anchor="middle">kills: CRD-shape prune</text>
+    </g>
+    <!-- port 3 : protocol -->
+    <g>
+      <rect x="760" y="600" width="180" height="88" rx="6" fill="#0f172a"/>
+      <rect x="760" y="600" width="180" height="88" rx="6" fill="rgba(251,146,60,0.3)" stroke="#fb923c" stroke-width="1.5"/>
+      <text x="850" y="622" fill="#fb923c" font-size="10" font-weight="700" text-anchor="middle">③ protocol port</text>
+      <text x="850" y="640" fill="#e2e8f0" font-size="8" text-anchor="middle">CONVERGENCE-gated steps</text>
+      <text x="850" y="656" fill="#94a3b8" font-size="7.5" text-anchor="middle">observe · timeout · fallback</text>
+      <text x="850" y="672" fill="#64748b" font-size="7" text-anchor="middle">kills: quiet mid-transition stall</text>
+    </g>
+
+    <!-- =============== GUEST / PAYLOAD TARGETS =============== -->
+    <rect x="980" y="426" width="240" height="252" rx="12" fill="rgba(30,41,59,0.3)" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="8,4"/>
+    <text x="1100" y="452" fill="#94a3b8" font-size="10" font-weight="700" text-anchor="middle">PAYLOAD-VERSION TARGETS</text>
+    <text x="1100" y="466" fill="#64748b" font-size="8" text-anchor="middle">version N ≠ substrate version</text>
+    <g>
+      <rect x="1000" y="478" width="200" height="56" rx="6" fill="#0f172a"/>
+      <rect x="1000" y="478" width="200" height="56" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+      <text x="1100" y="500" fill="#e2e8f0" font-size="9.5" font-weight="700" text-anchor="middle">operand BINARIES</text>
+      <text x="1100" y="516" fill="#94a3b8" font-size="7.5" text-anchor="middle">KAS, etcd, machine-approver…</text>
+    </g>
+    <g>
+      <rect x="1000" y="542" width="200" height="56" rx="6" fill="#0f172a"/>
+      <rect x="1000" y="542" width="200" height="56" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+      <text x="1100" y="564" fill="#e2e8f0" font-size="9.5" font-weight="700" text-anchor="middle">GUEST cluster API</text>
+      <text x="1100" y="580" fill="#94a3b8" font-size="7.5" text-anchor="middle">k8s + config.openshift.io CRDs</text>
+    </g>
+    <g>
+      <rect x="1000" y="606" width="200" height="56" rx="6" fill="#0f172a"/>
+      <rect x="1000" y="606" width="200" height="56" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+      <text x="1100" y="628" fill="#e2e8f0" font-size="9.5" font-weight="700" text-anchor="middle">cross-boundary peers</text>
+      <text x="1100" y="644" fill="#94a3b8" font-size="7.5" text-anchor="middle">konnectivity agent · MCD · SVM</text>
+    </g>
+
+    <!-- =============== ARROWS =============== -->
+    <!-- substrate -> contract (primitives up) -->
+    <line x1="540" y1="300" x2="588" y2="300" stroke="#34d399" stroke-width="1.6" marker-end="url(#arrEm)"/>
+    <!-- contract -> authorship -->
+    <line x1="742" y1="230" x2="794" y2="210" stroke="#fb923c" stroke-width="1.6" marker-end="url(#arrAm)"/>
+    <text x="767" y="226" fill="#fb923c" font-size="7" text-anchor="middle">primitives</text>
+    <!-- authorship -> ports (configures via) -->
+    <line x1="850" y1="370" x2="850" y2="422" stroke="#fbbf24" stroke-width="1.4" marker-end="url(#arrAm)"/>
+
+    <!-- port1 -> operand binaries -->
+    <line x1="942" y1="464" x2="998" y2="500" stroke="#34d399" stroke-width="1.6" marker-end="url(#arrEm)"/>
+    <!-- port2 -> guest API -->
+    <line x1="942" y1="552" x2="998" y2="562" stroke="#22d3ee" stroke-width="1.6" marker-end="url(#arr)"/>
+    <!-- port3 -> peers -->
+    <line x1="942" y1="640" x2="998" y2="636" stroke="#fb923c" stroke-width="1.6" marker-end="url(#arrAm)"/>
+
+    <!-- health / status back-channel (dashed) -->
+    <path d="M 1000 668 C 760 726, 540 712, 300 414" fill="none" stroke="#fb7185" stroke-width="1.2" stroke-dasharray="4,4" marker-end="url(#arrRo)"/>
+    <text x="430" y="726" fill="#fb7185" font-size="8" text-anchor="middle">observed convergence / health → recorded in HCP status (control channel)</text>
+
+    <!-- skew label on the gap -->
+    <text x="960" y="418" fill="#fb7185" font-size="8.5" font-weight="700" text-anchor="middle">⟂ VERSION SKEW BOUNDARY</text>
+
+    <!-- =============== LEGEND =============== -->
+    <g transform="translate(40,740)">
+      <rect x="0" y="0" width="1180" height="120" rx="8" fill="rgba(15,23,42,0.6)" stroke="#1e293b" stroke-width="1"/>
+      <text x="16" y="22" fill="#e2e8f0" font-size="10" font-weight="700">LEGEND — the one principle: version knowledge lives on the same side of the boundary as the versioned artifact</text>
+
+      <rect x="16" y="36" width="12" height="12" rx="2" fill="rgba(6,78,59,0.4)" stroke="#34d399"/>
+      <text x="34" y="46" fill="#cbd5e1" font-size="8.5">Tier 1 Substrate — agnostic (already ~4/5 of today's CPO)</text>
+      <rect x="16" y="56" width="12" height="12" rx="2" fill="rgba(120,53,15,0.3)" stroke="#fbbf24"/>
+      <text x="34" y="66" fill="#cbd5e1" font-size="8.5">Tier 2 Authorship — version-matched, rides the payload</text>
+      <rect x="16" y="76" width="12" height="12" rx="2" fill="rgba(251,146,60,0.3)" stroke="#fb923c"/>
+      <text x="34" y="86" fill="#cbd5e1" font-size="8.5">Environment Contract — the firewall (primitives, negotiated)</text>
+      <rect x="16" y="96" width="12" height="12" rx="2" fill="rgba(30,41,59,0.5)" stroke="#94a3b8"/>
+      <text x="34" y="106" fill="#cbd5e1" font-size="8.5">Payload-version targets (binaries · guest API · peers)</text>
+
+      <line x1="430" y1="42" x2="470" y2="42" stroke="#34d399" stroke-width="1.6" marker-end="url(#arrEm)"/>
+      <text x="478" y="46" fill="#cbd5e1" font-size="8.5">① mandatory version-gating → operand binaries</text>
+      <line x1="430" y1="62" x2="470" y2="62" stroke="#22d3ee" stroke-width="1.6" marker-end="url(#arr)"/>
+      <text x="478" y="66" fill="#cbd5e1" font-size="8.5">② discovery-gated writes → guest API</text>
+      <line x1="430" y1="82" x2="470" y2="82" stroke="#fb923c" stroke-width="1.6" marker-end="url(#arrAm)"/>
+      <text x="478" y="86" fill="#cbd5e1" font-size="8.5">③ convergence-gated steps → cross-boundary peers</text>
+      <line x1="430" y1="102" x2="470" y2="102" stroke="#fb7185" stroke-width="1.2" stroke-dasharray="4,4" marker-end="url(#arrRo)"/>
+      <text x="478" y="106" fill="#cbd5e1" font-size="8.5">observed health/convergence → HCP status back-channel</text>
+
+      <text x="840" y="46" fill="#94a3b8" font-size="8.5">INVARIANT core: ungated emission = hazard at any distance;</text>
+      <text x="840" y="60" fill="#94a3b8" font-size="8.5">missing version-floor net; self-API is a false skew surface.</text>
+      <text x="840" y="80" fill="#94a3b8" font-size="8.5">DISTANCE-VARIABLE shell: which guest shapes prune rotates</text>
+      <text x="840" y="94" fill="#94a3b8" font-size="8.5">with k8s minors (VAP-v1 vanished by 4.20; prom-prune appeared).</text>
+      <text x="840" y="108" fill="#64748b" font-size="8">∴ hazard set = f(CPO, guest) PAIR → conformance matrix.</text>
+    </g>
+  </svg>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <div class="ch"><span class="cd em"></span><h3>Tier 1 — Universal Substrate</h3></div>
+      <ul>
+        <li><span class="k">role:</span> control-plane hosting runtime</li>
+        <li>• placement, PKI/identity, datastore</li>
+        <li>• connectivity, cloud infra, orchestration</li>
+        <li>• cross-cluster bridge (plumbing)</li>
+        <li><span class="k">key:</span> carries no target-version knowledge →</li>
+        <li>&nbsp;&nbsp;already agnostic (live run proved 35/36)</li>
+        <li>&nbsp;&nbsp;ships independently of the payload</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="ch"><span class="cd or"></span><h3>Environment Contract — firewall</h3></div>
+      <ul>
+        <li><span class="k">carries:</span> primitives, not flags</li>
+        <li>• etcd endpoint · serving certs · kubeconfig</li>
+        <li>• konnectivity · config inputs · health sink</li>
+        <li><span class="k">versioned by:</span> CONTRACT ver, not OCP ver</li>
+        <li>• add-only, negotiated → churns slowly</li>
+        <li><span class="k">dissolves:</span> "ship independently" vs</li>
+        <li>&nbsp;&nbsp;"version-safe" — the seam IS the fix</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="ch"><span class="cd cyan"></span><h3>The 3 self-adapting ports</h3></div>
+      <ul>
+        <li><span class="k">①</span> operand-config: mandatory version-gating</li>
+        <li>&nbsp;&nbsp;(self-tracks live ver) → no unknown-flag</li>
+        <li><span class="k">②</span> guest-API: discovery-gated SSA writes</li>
+        <li>&nbsp;&nbsp;(OpenAPI v3) → no CRD-shape prune</li>
+        <li><span class="k">③</span> protocol: convergence-gated steps</li>
+        <li>&nbsp;&nbsp;(observe/timeout) → no quiet stall</li>
+        <li><span class="k">over all:</span> structural enforcement + matrix</li>
+      </ul>
+    </div>
+  </div>
+
+  <footer>Idea 1 · Universal CPO substrate · grounded in main vs 5.0 + main vs 4.20 diff passes (rendering + behavioral) · workshop artifact, not a proposal</footer>
+</body>
+</html>
